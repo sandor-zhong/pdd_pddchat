@@ -12,6 +12,7 @@ from playwright.sync_api import Locator, Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 import db
+from order_failures import is_input_interference, order_error_result
 from appeal_classifier import compact_chat_json
 from appeal_wording import generate_reconsideration_description
 from appeal_submit import collect_evidence_files, wait_for_submit_captcha
@@ -891,11 +892,11 @@ def process_reconsideration_task(
             shop,
             task["order_no"],
             task["record_key"],
-            "复议提交失败",
+            "跳过" if is_input_interference(exc) else "复议提交失败",
             error_message=str(exc),
             error_screenshot_path=error_shot,
         )
-        return {"order_no": task["order_no"], "result": f"失败：{exc}"}
+        return {"order_no": task["order_no"], "result": order_error_result(exc, "失败：")}
 
 
 def run_reconsiderations(

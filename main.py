@@ -74,6 +74,7 @@ import check_aftersale_appeal_results
 import check_appeal_results
 import check_reconsideration_results
 import db
+from order_failures import is_input_interference, order_error_result
 import result_query_settings
 import reconsideration
 from appeal_submit import (
@@ -746,7 +747,7 @@ def _process_one_appeal_record(
         return result_text
 
     except Exception as exc:
-        print(f"  订单 {order_no}（记录 {record_key}）处理失败: {exc}")
+        print(f"  订单 {order_no}（记录 {record_key}）{order_error_result(exc, '处理失败: ')}")
 
         _close_pages_opened_since(
             context,
@@ -762,7 +763,7 @@ def _process_one_appeal_record(
         except Exception:
             pass
 
-        result_text = f"失败: {exc}"
+        result_text = order_error_result(exc)
         db.record_appeal_result(
             shop, order_no, record_key, issue_type, result_text,
             form_screenshot_path=_form_screenshot_path(),
@@ -839,13 +840,16 @@ def submit_single_order(
             )
             processed_keys.add(target_key)
             outcomes.append(outcome)
+            if is_input_interference(outcome):
+                db.record_submit_result(shop, order_no, outcome)
+                return (order_no, outcome)
 
         result_text = _summarize_results(outcomes)
         db.record_submit_result(shop, order_no, result_text)
         return (order_no, result_text)
 
     except Exception as exc:
-        print(f"  订单 {order_no} 模拟申诉失败: {exc}")
+        print(f"  订单 {order_no} {order_error_result(exc, '模拟申诉失败: ')}")
 
         _close_pages_opened_since(
             context,
@@ -862,10 +866,10 @@ def submit_single_order(
             pass
 
         db.record_submit_result(
-            shop, order_no, f"失败: {exc}",
+            shop, order_no, order_error_result(exc),
             error_screenshot_path=error_screenshot,
         )
-        return (order_no, f"失败: {exc}")
+        return (order_no, order_error_result(exc))
 
 
 def run_phase3(
@@ -929,13 +933,13 @@ def process_and_submit_one_order(
             )
             print(f"  订单 {order_no} 分析完成 → {label}")
         except Exception as exc:
-            print(f"  订单 {order_no} 分析失败: {exc}，跳过本单提交")
+            print(f"  订单 {order_no} {order_error_result(exc, '分析失败: ')}，停止本单提交")
             shot = save_error_screenshot(chat_page, order_no)
             db.record_analysis_failed(
                 SHOP_ID or "default", order_no, exc,
                 screenshot_path=to_relative_evidence_path(shot) if shot else None,
             )
-            return (order_no, f"分析失败: {exc}")
+            return (order_no, order_error_result(exc, "分析失败: "))
     else:
         print(f"  订单 {order_no} 已有分析结果，跳过重新分析")
 

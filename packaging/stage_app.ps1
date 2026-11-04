@@ -48,6 +48,8 @@ $RootFiles = @(
     "memory_worker.py"
     "paths.py"
     "stealth.py"
+    "native_mouse.py"
+    "order_failures.py"
     "browser_settings.py"
     "pdd_chat.py"
     "appeal_submit.py"

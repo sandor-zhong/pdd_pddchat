@@ -5,6 +5,7 @@ import random
 import re
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote_plus, urlsplit
 
 from playwright.sync_api import (
     Page,
@@ -190,6 +191,7 @@ def start_result_observer(page: Page) -> None:
         window.__pddChatMutationCount = 0;
         window.__pddChatLastMutation = 0;
         window.__pddChatQueryClicked = false;
+        window.__pddChatClickDetails = null;
         window.__pddChatObserver = new MutationObserver(records => {
             if (!window.__pddChatQueryClicked) return;
             const relevant = records.some(record => {
@@ -210,15 +212,60 @@ def start_result_observer(page: Page) -> None:
         });
     }""")
     get_query_button(page).evaluate("""button => {
-        button.addEventListener('click', () => {
-            window.__pddChatQueryClicked = true;
+        button.addEventListener('click', event => {
+            window.__pddChatClickDetails = {
+                trusted: event.isTrusted, detail: event.detail,
+                at: performance.now(), defaultPrevented: event.defaultPrevented
+            };
+            window.__pddChatQueryClicked = event.isTrusted;
             window.__pddChatMutationCount = 0;
             window.__pddChatLastMutation = performance.now();
+            queueMicrotask(() => {
+                if (window.__pddChatClickDetails)
+                    window.__pddChatClickDetails.defaultPrevented = event.defaultPrevented;
+            });
         }, {capture: true, once: true});
     }""")
 
 
-def wait_for_query_result(page: Page, old_signature: str, timeout: int = 30_000) -> None:
+def _query_network_probe(page: Page, order_no: str):
+    """被动观察含本订单号的请求，不发送请求，也不记录请求正文或密钥。"""
+    records = []
+    requests = {}
+    order_pattern = re.compile(r'(?<!\d)' + re.escape(order_no) + r'(?!\d)')
+
+    def requested(request):
+        if request.resource_type not in ('fetch', 'xhr'):
+            return
+        text = unquote_plus(request.url + '\n' + (request.post_data or ''))
+        if not order_pattern.search(text):
+            return
+        row = {'path': urlsplit(request.url).path[:200], 'method': request.method,
+               'status': None, 'failed': False}
+        if len(records) < 20:
+            records.append(row)
+            requests[request] = row
+
+    def responded(response):
+        if response.request in requests:
+            requests[response.request]['status'] = response.status
+
+    def failed(request):
+        if request in requests:
+            requests[request]['failed'] = True
+
+    handlers = [('request', requested), ('response', responded), ('requestfailed', failed)]
+    for event, handler in handlers:
+        page.on(event, handler)
+
+    def stop():
+        for event, handler in handlers:
+            page.remove_listener(event, handler)
+    return records, stop
+
+
+def wait_for_query_result(page: Page, old_signature: str, timeout: int = 30_000,
+                          *, network_records: list | None = None) -> None:
     """等待本次查询产生可见且稳定的结果；超时禁止采集旧内容。"""
     try:
         page.wait_for_function("""oldText => {
@@ -240,8 +287,21 @@ def wait_for_query_result(page: Page, old_signature: str, timeout: int = 30_000)
         }""", arg=old_signature, timeout=timeout).dispose()
     except PlaywrightTimeoutError as exc:
         clicked = page.evaluate('Boolean(window.__pddChatQueryClicked)')
+        state = page.evaluate('''() => ({
+            click: window.__pddChatClickDetails || null,
+            mutations: window.__pddChatMutationCount || 0,
+            messages: [...document.querySelectorAll('.new-message-list .message-item')]
+                .filter(el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden').length,
+            loading: [...document.querySelectorAll('[aria-busy="true"], [data-testid="beast-core-loading"], .ant-spin-spinning')]
+                .some(el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden')
+        })''')
+        details = json.dumps({'page': state, 'order_requests': network_records}, ensure_ascii=False)
+        print('[聊天查询诊断] ' + details, flush=True)
         raise RuntimeError(
-            f"聊天查询未确认新结果（查询按钮点击事件={clicked}），已停止本单采集，避免读取旧聊天记录。"
+            f"聊天查询未确认新结果（查询按钮真实点击事件={clicked}；"
+            f"含本订单号请求={'未监测' if network_records is None else len(network_records)}；"
+            f"结果变化={state['mutations']}；加载中={state['loading']}），"
+            "已停止本单采集，避免读取旧聊天记录。详细状态见[聊天查询诊断]日志。"
         ) from exc
     finally:
         page.evaluate('() => window.__pddChatObserver?.disconnect()')
@@ -1627,18 +1687,29 @@ def query_chat_records(
 
     print(f"正在查询订单：{order_no}")
 
-    clear_blockers(page)
-    query_button.scroll_into_view_if_needed(timeout=8000)
-    # Locator.click 会检查遮挡、稳定性和实际可点击性，失败直接停止。
-    query_button.click(timeout=8000)
+    network_records, stop_probe = _query_network_probe(page, order_no)
+    try:
+        clear_blockers(page)
+        query_button.scroll_into_view_if_needed(timeout=8000)
+        query_button.click(timeout=8000)
+        # Native SendInput returns before the browser necessarily dispatches click.
+        # Briefly await the DOM event rather than misreporting an in-flight click.
+        try:
+            page.wait_for_function('Boolean(window.__pddChatQueryClicked)', timeout=2000).dispose()
+        except PlaywrightTimeoutError:
+            raise RuntimeError('查询按钮未确认收到真实点击事件，已停止本单，不读取旧聊天。')
+        clicked = page.evaluate('Boolean(window.__pddChatQueryClicked)')
+        print(f'[聊天查询] 订单 {order_no} 查询按钮真实点击事件={clicked}', flush=True)
+        if not clicked:
+            raise RuntimeError('查询按钮未确认收到真实点击事件，已停止本单，不读取旧聊天。')
 
-    # 点击查询会触发后端请求，是验证码高发时机
-    clear_blockers(page)
-
-    wait_for_query_result(
-        page=page,
-        old_signature=old_signature,
-    )
+        # 点击查询会触发后端请求，是验证码高发时机。
+        clear_blockers(page)
+        wait_for_query_result(page=page, old_signature=old_signature,
+                              network_records=network_records)
+    finally:
+        stop_probe()
+        page.evaluate('() => window.__pddChatObserver?.disconnect()')
 
     records, no_chat_screenshot = collect_all_chat_records(
         page=page,

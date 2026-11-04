@@ -16,6 +16,7 @@ from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 import db
+from order_failures import is_input_interference, order_error_result
 from appeal_classifier import (
     NO_CHAT_RECORD_LABEL,
     classify_appeal_evidence,
@@ -1135,13 +1136,13 @@ def process_aftersale_task(
             shop,
             order_no,
             record_key,
-            "失败",
+            "跳过" if is_input_interference(exc) else "失败",
             error_message=str(exc),
             error_screenshot_path=(
                 to_relative_evidence_path(shot) if shot is not None else None
             ),
         )
-        return {"order_no": order_no, "record_key": record_key, "result": f"失败: {exc}"}
+        return {"order_no": order_no, "record_key": record_key, "result": order_error_result(exc)}
     finally:
         if detail_page is not None and not detail_page.is_closed():
             try:

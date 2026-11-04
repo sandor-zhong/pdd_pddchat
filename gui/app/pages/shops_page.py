@@ -672,11 +672,17 @@ class ShopsPage(QWidget):
         confirmed = msgbox.confirm_yes_no(
             self,
             "确认删除店铺",
-            f"确定要删除「{shop}」的登录态吗？\n\n"
-            "只会删除本地保存的登录信息，之后需要重新登录才能恢复；"
+            f"确定要删除店铺「{shop}」吗？\n\n"
+            "将从店铺管理列表移除，并删除本地保存的账号和登录信息；之后可以重新添加。"
             "这家店铺在数据库里的历史订单记录不受影响、仍会保留。",
         )
         if not confirmed:
             return
-        shop_repo.delete_shop_profile(shop)
+        try:
+            shop_repo.delete_shop_profile(shop)
+        except Exception as error:
+            logger.exception("删除店铺失败：%s", shop)
+            msgbox.critical(self, "删除店铺失败", str(error))
+            return
+        self._model.login_checks.pop(shop, None)
         self._refresh_now()

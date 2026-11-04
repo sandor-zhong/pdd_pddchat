@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from order_failures import is_input_interference
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -602,7 +603,7 @@ def record_analysis_failed(
     （不传也一样，这样已有截图路径不会被没截到的一次调用覆盖成空）。
     """
     fields: dict[str, object] = {
-        "status": "analysis_failed",
+        "status": "skipped" if is_input_interference(error) else "analysis_failed",
         "error_message": str(error),
     }
     if screenshot_path:
@@ -636,7 +637,7 @@ def record_submit_result(
     结论"，跟"提交这个动作本身失败了"是两回事，不该都归进 submit_failed，
     否则 --status/GUI 会把"审核给了新说法"误报成程序出错。
     """
-    status = _SUBMIT_STATUS_MAP.get(result_text)
+    status = "skipped" if is_input_interference(result_text) else _SUBMIT_STATUS_MAP.get(result_text)
     fields: dict[str, object] = {}
 
     if status is not None:
@@ -647,7 +648,7 @@ def record_submit_result(
         # 那条早就不成立的旧错误信息一直留在库里，误导 --status 报表和
         # 人工查库。跟 record_analyzed 对分析阶段成功时清 error_message
         # 是同一个思路。
-        fields["error_message"] = None
+        fields["error_message"] = result_text if is_input_interference(result_text) else None
         if status in ("submitted", "simulated"):
             fields["submitted_at"] = _now()
     else:
@@ -717,8 +718,8 @@ def record_appeal_result(
     要支持分阶段增量更新同一行），用 INSERT OR REPLACE 整行覆盖足够，不会
     碰到 _upsert() 文档里提到的部分字段 NOT NULL 校验问题。
     """
-    status = _SUBMIT_STATUS_MAP.get(result_text)
-    error_message = None if status is not None else result_text
+    status = "skipped" if is_input_interference(result_text) else _SUBMIT_STATUS_MAP.get(result_text)
+    error_message = result_text if is_input_interference(result_text) or status is None else None
     if status is None:
         status = fallback_status
     submitted_at = _now() if status in ("submitted", "simulated") else None

@@ -564,6 +564,5 @@ def main() -> None:
     print()
     print("请复制上面的文案，粘贴到申诉表单中提交。")
 
-
-if __name__ == "__main__":
+if __name__ == "__main_ _":
     main()

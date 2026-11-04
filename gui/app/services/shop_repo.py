@@ -25,6 +25,22 @@ DISABLED_SHOPS_PATH = (
 IMPORTED_SHOPS_PATH = (
     Path(__file__).resolve().parent.parent.parent / "state" / "imported_shops.json"
 )
+DELETED_SHOPS_PATH = (
+    Path(__file__).resolve().parent.parent.parent / "state" / "deleted_shops.json"
+)
+
+
+def _load_deleted_shops() -> set[str]:
+    if not DELETED_SHOPS_PATH.is_file():
+        return set()
+    return set(json.loads(DELETED_SHOPS_PATH.read_text(encoding="utf-8")).get("deleted", []))
+
+
+def _save_deleted_shops(shops: set[str]) -> None:
+    DELETED_SHOPS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary = DELETED_SHOPS_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"deleted": sorted(shops)}, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(DELETED_SHOPS_PATH)
 
 
 @dataclass
@@ -152,24 +168,35 @@ def set_shop_disabled(shop: str, disabled: bool) -> None:
 
 
 def delete_shop_profile(shop: str) -> None:
-    """删除 state/profiles/<shop>/ 登录态目录，不碰数据库里的历史订单
-    记录（见项目实施计划"删除店铺"一节的默认行为）。"""
+    """移除店铺及其登录信息；保留历史订单，但不让历史记录重新生成店铺行。"""
     import shutil
+    from . import account_store
 
-    profile_dir = PROJECT_PATHS.root / "state" / "profiles" / shop
+    profiles_root = (PROJECT_PATHS.root / "state" / "profiles").resolve()
+    profile_dir = profiles_root / shop
+    if not shop.strip() or profile_dir.resolve().parent != profiles_root:
+        raise ValueError("店铺登录目录不在预期位置，已停止删除。")
+    if profile_dir.is_symlink() or (
+        profile_dir.exists() and getattr(profile_dir.lstat(), "st_file_attributes", 0) & 0x400
+    ):
+        raise ValueError("店铺登录目录是链接，已停止删除。")
+    deleted = _load_deleted_shops()
     if profile_dir.is_dir():
-        shutil.rmtree(profile_dir)
+        try:
+            shutil.rmtree(profile_dir)
+        except OSError as error:
+            raise RuntimeError(
+                "无法删除店铺登录目录。请先停止该店铺的任务，并关闭店铺浏览器后重试。\n"
+                + str(error)
+            ) from error
+    account_store.delete_by_shop(shop)
     imported = _load_imported_shops()
     if shop in imported:
         imported.pop(shop, None)
         _save_imported_shops(imported)
-    try:
-        from . import account_store
-
-        account_store.delete_by_shop(shop)
-    except Exception:
-        # Profile deletion remains available if the optional account store is unreadable.
-        pass
+    set_shop_disabled(shop, False)
+    deleted.add(shop)
+    _save_deleted_shops(deleted)
 
 
 def reset_today_schedule(shop: str) -> None:
@@ -261,7 +288,8 @@ def list_shop_summaries() -> list[ShopSummary]:
     imported_rows = _load_imported_shops()
 
     all_shops = sorted(
-        profile_shops | set(summary_rows) | set(schedule_rows) | set(imported_rows)
+        (profile_shops | set(summary_rows) | set(schedule_rows) | set(imported_rows))
+        - (_load_deleted_shops() - profile_shops - set(imported_rows))
     )
 
     result: list[ShopSummary] = []

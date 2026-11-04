@@ -19,5 +19,8 @@ $guiPython = Join-Path $PSScriptRoot 'stage\runtime\gui\python.exe'
 & $guiPython -B -c "from PyQt5.QtWidgets import QApplication, QFileDialog; from PyQt5.QtChart import QChart, QChartView; from PyQt5.QtSvg import QSvgRenderer; from PyQt5.QtGui import QPixmap; a=QApplication(['packaging-check', '-platform', 'offscreen']); v=QChartView(QChart()); d=QFileDialog(); p=QPixmap(32,32); assert not p.isNull(); print('Qt runtime check OK')"
 if ($LASTEXITCODE -ne 0) { throw 'Qt runtime validation failed; installer build stopped.' }
 & (Join-Path $PSScriptRoot 'stage_app.ps1')
+$pipelinePython = Join-Path $PSScriptRoot 'stage\runtime\pipeline\python.exe'
+& $pipelinePython -B -c "import native_mouse; from stealth import create_stealth_context; print('Pipeline mouse module import check OK')"
+if ($LASTEXITCODE -ne 0) { throw 'Pipeline module validation failed; installer build stopped.' }
 & $CompilerPath (Join-Path $PSScriptRoot 'pddchat.iss')
 if ($LASTEXITCODE -ne 0) { throw "Installer build failed: $LASTEXITCODE" }

@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from order_failures import InputInterferenceError
+
 import base64
 import json
 import math
@@ -126,6 +128,8 @@ def is_captcha_visible(page: Page) -> bool:
     try:
         return page.locator(VISIBLE_CAPTCHA_SELECTOR).count() > 0
 
+    except InputInterferenceError:
+        raise
     except Exception:
         return False
 
@@ -140,6 +144,8 @@ def is_rotate_captcha(page: Page) -> bool:
     try:
         return page.locator(VISIBLE_ROTATE_CAPTCHA_SELECTOR).count() > 0
 
+    except InputInterferenceError:
+        raise
     except Exception:
         return False
 
@@ -149,6 +155,8 @@ def is_text_captcha(page: Page) -> bool:
     try:
         return page.locator(VISIBLE_TEXT_CAPTCHA_SELECTOR).count() > 0
 
+    except InputInterferenceError:
+        raise
     except Exception:
         return False
 
@@ -157,6 +165,8 @@ def is_picture_captcha(page: Page) -> bool:
     """检测当前验证码是否是图片点选验证码。"""
     try:
         return page.locator(VISIBLE_PICTURE_CAPTCHA_SELECTOR).count() > 0
+    except InputInterferenceError:
+        raise
     except Exception:
         return False
 
@@ -194,6 +204,8 @@ def save_captcha_screenshot(page: Page) -> Path | None:
 
         return screenshot_path
 
+    except InputInterferenceError:
+        raise
     except Exception as error:
         print(f"保存验证码截图失败：{error}")
         return None
@@ -313,6 +325,8 @@ def dump_rotate_captcha_info(
             html = captcha.evaluate("el => el.outerHTML")
         html_path = DEBUG_DIR / f"rotate_captcha_{timestamp}.html"
         html_path.write_text(html, encoding="utf-8")
+    except InputInterferenceError:
+        raise
     except Exception as error:
         print(f"保存旋转验证码 HTML 失败：{error}")
 
@@ -333,6 +347,8 @@ def dump_rotate_captcha_info(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+    except InputInterferenceError:
+        raise
     except Exception as error:
         print(f"保存旋转验证码参数失败：{error}")
 
@@ -368,62 +384,64 @@ def _human_drag_slider(
     # 停顿一下，模拟"准备开始拖动"
     page.wait_for_timeout(random.randint(100, 300))
 
-    page.mouse.down()
+    try:
+        page.mouse.down()
 
-    # ── ② 生成贝塞尔缓动轨迹 ──
-    total_distance = end_x - start_x
-    # ease_in_out 采样点：用 sin 曲线变换实现慢→快→慢
-    raw_steps = [i / total_steps for i in range(total_steps + 1)]
-    eased_steps = []
-    for t in raw_steps:
-        # 使用 cubic ease-in-out
-        if t < 0.5:
-            et = 4 * t * t * t
-        else:
-            et = 1 - pow(-2 * t + 2, 3) / 2
-        eased_steps.append(et)
+        # ── ② 生成贝塞尔缓动轨迹 ──
+        total_distance = end_x - start_x
+        # ease_in_out 采样点：用 sin 曲线变换实现慢→快→慢
+        raw_steps = [i / total_steps for i in range(total_steps + 1)]
+        eased_steps = []
+        for t in raw_steps:
+            # 使用 cubic ease-in-out
+            if t < 0.5:
+                et = 4 * t * t * t
+            else:
+                et = 1 - pow(-2 * t + 2, 3) / 2
+            eased_steps.append(et)
 
-    # Y 轴抖动幅度
-    y_jitter_base = random.uniform(3, 7)
+        # Y 轴抖动幅度
+        y_jitter_base = random.uniform(3, 7)
 
-    # 随机选择 1-3 个中途停顿点
-    num_pauses = random.randint(1, 3)
-    pause_indices = sorted(random.sample(
-        range(total_steps // 4, total_steps * 3 // 4), num_pauses,
-    ))
+        # 随机选择 1-3 个中途停顿点
+        num_pauses = random.randint(1, 3)
+        pause_indices = sorted(random.sample(
+            range(total_steps // 4, total_steps * 3 // 4), num_pauses,
+        ))
 
-    prev_t = 0.0
-    for i, et in enumerate(eased_steps):
-        # Y 轴：随机低频正弦抖动 + 一点随机噪声
-        phase = i / total_steps * math.pi * random.uniform(3, 6)
-        y_offset = math.sin(phase) * y_jitter_base + random.uniform(-1, 1)
+        prev_t = 0.0
+        for i, et in enumerate(eased_steps):
+            # Y 轴：随机低频正弦抖动 + 一点随机噪声
+            phase = i / total_steps * math.pi * random.uniform(3, 6)
+            y_offset = math.sin(phase) * y_jitter_base + random.uniform(-1, 1)
 
-        current_x = start_x + et * total_distance
-        current_y = start_y + y_offset
+            current_x = start_x + et * total_distance
+            current_y = start_y + y_offset
 
-        # 每步之间的间隔也模拟变速：密集段快、稀疏段慢
-        step_delta = abs(et - prev_t)
-        base_interval = int(5 + step_delta * 200)  # 5~20ms
-        interval = max(2, base_interval + random.randint(-2, 2))
-        prev_t = et
+            # 每步之间的间隔也模拟变速：密集段快、稀疏段慢
+            step_delta = abs(et - prev_t)
+            base_interval = int(5 + step_delta * 200)  # 5~20ms
+            interval = max(2, base_interval + random.randint(-2, 2))
+            prev_t = et
 
-        page.mouse.move(current_x, current_y)
-        page.wait_for_timeout(interval)
+            page.mouse.move(current_x, current_y)
+            page.wait_for_timeout(interval)
 
-        # 在停顿点暂停更久（模拟手指/鼠标短暂停顿）
-        if i in pause_indices:
-            page.wait_for_timeout(random.randint(80, 200))
+            # 在停顿点暂停更久（模拟手指/鼠标短暂停顿）
+            if i in pause_indices:
+                page.wait_for_timeout(random.randint(80, 200))
 
-    # ── ③ 过冲回拉（模拟滑块惯性过头再拉回） ──
-    overshoot = random.uniform(3, 8)
-    overshoot_x = end_x + overshoot
-    for ox in _overshoot_traj(end_x, overshoot_x, 6):
-        page.mouse.move(ox, start_y)
-        page.wait_for_timeout(random.randint(8, 15))
+        # ── ③ 过冲回拉（模拟滑块惯性过头再拉回） ──
+        overshoot = random.uniform(3, 8)
+        overshoot_x = end_x + overshoot
+        for ox in _overshoot_traj(end_x, overshoot_x, 6):
+            page.mouse.move(ox, start_y)
+            page.wait_for_timeout(random.randint(8, 15))
 
-    # ── ④ 松手前短暂停顿（模拟人眼确认对齐） ──
-    page.wait_for_timeout(random.randint(150, 400))
-    page.mouse.up()
+        # ── ④ 松手前短暂停顿（模拟人眼确认对齐） ──
+        page.wait_for_timeout(random.randint(150, 400))
+    finally:
+        page.mouse.up()
 
 
 def _overshoot_traj(
@@ -459,6 +477,8 @@ def _extract_captcha_image_bytes(page: Page, el: Locator) -> bytes | None:
                 return { ok: false, value: src };
             }"""
         )
+    except InputInterferenceError:
+        raise
     except Exception as error:
         print(f"  读取验证码图片 src 失败：{error}")
         return None
@@ -481,6 +501,8 @@ def _extract_captcha_image_bytes(page: Page, el: Locator) -> bytes | None:
                     }))""",
                 src_url,
             )
+        except InputInterferenceError:
+            raise
         except Exception as error:
             print(f"  抓取验证码图片 URL 失败：{error}")
             return None
@@ -498,6 +520,8 @@ def _extract_captcha_image_bytes(page: Page, el: Locator) -> bytes | None:
         from urllib.parse import unquote_to_bytes
 
         return unquote_to_bytes(encoded)
+    except InputInterferenceError:
+        raise
     except Exception as error:
         print(f"  解析验证码图片 data URI 失败：{error}")
         return None
@@ -620,6 +644,8 @@ def try_auto_solve_rotate_captcha(page: Page) -> bool:
             print("自动破解：拖动后验证码仍然存在，破解失败。")
             return False
 
+    except InputInterferenceError:
+        raise
     except Exception as exc:
         print(f"自动破解：发生异常，回退人工。{exc}")
         return False
@@ -647,6 +673,8 @@ def _recorded_solve(page, captcha_type, solver, challenge_id, attempt):
         ):
             try:
                 artifacts[name] = capture()
+            except InputInterferenceError:
+                raise
             except Exception as exc:
                 record["capture_errors"].append(f"{name}: {type(exc).__name__}")
         _active_attempt = {"record": record, "artifacts": artifacts}
@@ -658,6 +686,8 @@ def _recorded_solve(page, captcha_type, solver, challenge_id, attempt):
         record["finished_at"] = datetime.now().isoformat()
         try:
             captcha_diagnostics.save_attempt(BASE_DIR / "debug" / "captcha_attempts", record, artifacts)
+        except InputInterferenceError:
+            raise
         except Exception as exc:
             print(f"[验证码诊断] 记录保存失败：{type(exc).__name__}: {exc}")
 
@@ -717,6 +747,8 @@ def _refresh_and_confirm_captcha(page: Page, label: str) -> None:
             if any(word in url.path.lower() for word in ("captcha", "verify", "challenge")) and len(network_events) < 20:
                 network_events.append({"phase": phase, "path": url.path,
                                        "status": getattr(event, "status", None) if phase == "response" else None})
+        except InputInterferenceError:
+            raise
         except Exception:
             pass
     def requested(request):
@@ -733,6 +765,8 @@ def _refresh_and_confirm_captcha(page: Page, label: str) -> None:
             prefix = f"refresh_{number}_{phase}"
             _active_attempt["artifacts"][prefix + ".png"] = box.screenshot(timeout=1500)
             _active_attempt["artifacts"][prefix + ".html"] = box.evaluate("el => el.outerHTML").encode("utf-8")
+        except InputInterferenceError:
+            raise
         except Exception as exc:
             _active_attempt["record"]["capture_errors"].append(f"refresh_{phase}: {type(exc).__name__}")
     page.on("request", requested)
@@ -771,6 +805,8 @@ def _refresh_and_confirm_captcha(page: Page, label: str) -> None:
             capture(click_attempt, "after")
             _captcha_diagnostic("刷新尚未确认生效：未检测到新图片或新题型")
         raise CaptchaRefreshError("两次点击刷新后仍未确认换题，跳过当前订单，避免重复识别旧图片")
+    except InputInterferenceError:
+        raise
     except Exception as exc:
         _captcha_diagnostic(f"验证码刷新未完成：{type(exc).__name__}: {exc}")
         if isinstance(exc, CaptchaRefreshError):
@@ -815,6 +851,8 @@ def _refresh_visible_captcha(page: Page, captcha_type: str) -> None:
         refresh.first.click()
         jitter_wait(page, 700)
         _captcha_diagnostic(f"{captcha_type}验证码 5 秒后仍存在，已点击刷新")
+    except InputInterferenceError:
+        raise
     except Exception as exc:
         _captcha_diagnostic(
             f"刷新{captcha_type}验证码失败：{type(exc).__name__}: {exc}"
@@ -857,6 +895,8 @@ def try_auto_solve_text_captcha(page: Page) -> bool:
         stage = "调用识别接口"
         try:
             raw_result = _ai_recognize_text_captcha(data_uri)
+        except InputInterferenceError:
+            raise
         except Exception as exc:
             if _is_captcha_ai_timeout(exc):
                 _captcha_diagnostic(
@@ -915,6 +955,8 @@ def try_auto_solve_text_captcha(page: Page) -> bool:
 
     except CaptchaRefreshError:
         raise
+    except InputInterferenceError:
+        raise
     except Exception as exc:
         _captcha_diagnostic(f"{stage}异常：{type(exc).__name__}: {exc}")
         if captcha is not None:
@@ -954,6 +996,8 @@ def _dump_picture_captcha_info(
             encoding="utf-8",
         )
         return path
+    except InputInterferenceError:
+        raise
     except Exception as exc:
         _captcha_diagnostic(f"保存点选验证码定位参数失败：{type(exc).__name__}: {exc}")
         return None
@@ -994,6 +1038,8 @@ def try_auto_solve_picture_captcha(page: Page) -> bool:
         stage = "调用点选识别接口"
         try:
             result = _ai_locate_picture_captcha(data_uri, question)
+        except InputInterferenceError:
+            raise
         except Exception as exc:
             if _is_captcha_ai_timeout(exc):
                 _captcha_diagnostic("点选验证码 AI 识别超过 60 秒，正在刷新后重试")
@@ -1060,6 +1106,8 @@ def try_auto_solve_picture_captcha(page: Page) -> bool:
                 _refresh_picture_captcha(page, captcha)
             return False
     except CaptchaRefreshError:
+        raise
+    except InputInterferenceError:
         raise
     except Exception as exc:
         _captcha_diagnostic(f"{stage}异常：{type(exc).__name__}: {exc}")

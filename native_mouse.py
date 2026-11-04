@@ -16,10 +16,25 @@ from ctypes import wintypes
 from functools import wraps
 
 from playwright.sync_api import Locator, Mouse, Page, expect
+from order_failures import InputInterferenceError
 
 _installed = False
 _pages = {}
 _driver = None
+
+
+class _MouseInput(ctypes.Structure):
+    _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
+                ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class _InputUnion(ctypes.Union):
+    _fields_ = [("mi", _MouseInput)]
+
+
+class _Input(ctypes.Structure):
+    _fields_ = [("type", wintypes.DWORD), ("value", _InputUnion)]
 
 
 class WindowsMouse:
@@ -70,6 +85,11 @@ class WindowsMouse:
         self.user.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
         self.user.IsZoomed.argtypes = [wintypes.HWND]
         self.user.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+        self.user.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+        self.user.GetAsyncKeyState.argtypes = [ctypes.c_int]
+        self.user.GetAsyncKeyState.restype = ctypes.c_short
+        self.user.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_Input), ctypes.c_int]
+        self.user.SendInput.restype = wintypes.UINT
         self.user.mouse_event.argtypes = [
             wintypes.DWORD,
             wintypes.DWORD,
@@ -186,21 +206,32 @@ class WindowsMouse:
 
     def move(self, page, x, y, *, steps=1):
         with self.locked():
+            self.ensure_idle_buttons()
             if self.drag_page is not None and self.drag_page is not page._impl_obj:
                 raise RuntimeError("拖拽过程中不能切换页面。")
             end_x, end_y = self.point(page, x, y)
             start = wintypes.POINT()
             self.user.GetCursorPos(ctypes.byref(start))
+            previous = None
             for i in range(1, max(1, steps) + 1):
+                if previous is not None:
+                    self.assert_cursor_position(*previous)
                 ratio = i / max(1, steps)
-                if not self.user.SetCursorPos(
-                    round(start.x + (end_x - start.x) * ratio),
-                    round(start.y + (end_y - start.y) * ratio),
-                ):
+                target = (round(start.x + (end_x - start.x) * ratio),
+                          round(start.y + (end_y - start.y) * ratio))
+                if not self.user.SetCursorPos(*target):
                     raise ctypes.WinError(ctypes.get_last_error())
+                previous = target
                 if steps > 1:
                     time.sleep(0.008)
             self.positions[page._impl_obj] = (x, y)
+
+    def assert_cursor_position(self, x, y):
+        cursor = wintypes.POINT()
+        if not self.user.GetCursorPos(ctypes.byref(cursor)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if abs(cursor.x - x) > 3 or abs(cursor.y - y) > 3:
+            raise InputInterferenceError("检测到操作期间系统鼠标被移离目标，已停止当前订单。")
 
     def down(self, page, *, button="left", click_count=1):
         flags = {"left": 0x2, "right": 0x8, "middle": 0x20}
@@ -235,18 +266,54 @@ class WindowsMouse:
             self.drag_owner = None
             self.kernel.ReleaseMutex(self.mutex)
 
+    def ensure_idle_buttons(self):
+        """空闲移动前清理系统残留按键；显式 down/move/up 拖动不受影响。"""
+        if self.drag_page is not None:
+            return
+        for key, flag in ((0x01, 0x04), (0x02, 0x10), (0x04, 0x40)):
+            if self.user.GetAsyncKeyState(key) & 0x8000:
+                self.user.mouse_event(flag, 0, 0, 0, 0)
+                print("[系统鼠标] 检测到残留按键，已松开后重新定位。", flush=True)
+
+    def click_pulse(self, button):
+        down, up = {"left": (0x02, 0x04), "right": (0x08, 0x10),
+                    "middle": (0x20, 0x40)}[button]
+        events = (_Input * 2)()
+        events[0].value.mi.dwFlags = down
+        events[1].value.mi.dwFlags = up
+        # One system input batch: no movement or sleep between button down/up.
+        complete = False
+        try:
+            complete = self.user.SendInput(2, events, ctypes.sizeof(_Input)) == 2
+            if not complete:
+                raise RuntimeError("系统鼠标点击未完整发送，已停止操作。")
+        finally:
+            # SendInput may insert only part of a batch (e.g. desktop changes).
+            if not complete or self.user.GetAsyncKeyState({"left": 1, "right": 2, "middle": 4}[button]) & 0x8000:
+                self.user.mouse_event(up, 0, 0, 0, 0)
+
     def up(self, page, *, button="left", click_count=1):
         self.release()
 
-    def click(self, page, x, y, *, button="left", click_count=1, delay=0):
+    def click(self, page, x, y, *, button="left", click_count=1, delay=0, _validate=None):
         with self.locked():
+            # A click is never a continuation of an unfinished slider drag.
+            self.release()
+            self.ensure_idle_buttons()
             self.move(page, x, y, steps=8)
+            aimed_position = self.point(page, x, y)
             for i in range(click_count):
-                try:
-                    self.down(page, button=button)
-                    time.sleep((delay or 50) / 1000)
-                finally:
-                    self.release()
+                # Keep aiming delay before the click, never while holding a button.
+                if delay:
+                    time.sleep(delay / 1000)
+                self.assert_cursor_position(*aimed_position)
+                screen_x, screen_y = self.point(page, x, y)
+                if _validate is not None:
+                    _validate()
+                self.ensure_idle_buttons()
+                if not self.user.SetCursorPos(screen_x, screen_y):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                self.click_pulse(button)
                 if i + 1 < click_count:
                     time.sleep(0.06)
 
@@ -276,6 +343,8 @@ def _enabled(page):
 def _locator_action(locator, action, **options):
     page = locator.page
     with _driver.locked():
+        _driver.release()
+        _driver.ensure_idle_buttons()
         # Maximizing changes layout; locate the target only after the window has
         # reached its required state, so the first click uses the new coordinates.
         _driver.window(page)
@@ -293,7 +362,8 @@ def _locator_action(locator, action, **options):
         }
         x, y = box["x"] + position["x"], box["y"] + position["y"]
         # Check the actual hit target, including overlays, before moving the OS cursor.
-        if not options.pop("force", False) and not locator.evaluate(
+        force = options.pop("force", False)
+        if not force and not locator.evaluate(
             "(el, p) => { const r=el.getBoundingClientRect(); const hit=el.ownerDocument.elementFromPoint(r.x+p.x,r.y+p.y); return hit===el || el.contains(hit); }",
             position,
         ):
@@ -307,6 +377,15 @@ def _locator_action(locator, action, **options):
         if action == "hover":
             _driver.move(page, x, y, steps=8)
         else:
+            def validate():
+                current = locator.bounding_box(timeout=timeout)
+                if not current or abs(current['x'] + position['x'] - x) > 1 or abs(current['y'] + position['y'] - y) > 1:
+                    raise RuntimeError("点击前目标位置发生变化，已停止系统鼠标点击。")
+                if not force and not locator.evaluate(
+                    "(el, p) => { const r=el.getBoundingClientRect(); const hit=el.ownerDocument.elementFromPoint(r.x+p.x,r.y+p.y); return hit===el || el.contains(hit); }", position
+                ):
+                    raise RuntimeError("点击前目标被遮挡，已停止系统鼠标点击。")
+            options['_validate'] = validate
             getattr(_driver, action)(page, x, y, **options)
 
 

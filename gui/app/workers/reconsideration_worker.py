@@ -10,6 +10,7 @@ from PyQt5.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
 
 from ..services.app_logging import logger
 from .base_process_worker import ProcessLineIO
+from order_failures import is_input_interference, order_error_result
 
 
 @dataclass
@@ -207,7 +208,9 @@ class ReconsiderationWorker(QObject):
             state.remaining = max(0, int(message.get("remaining", 0)))
             order_no = str(message.get("order_no") or "")
             result = str(message.get("result") or "")
-            if result == "已提交复议":
+            if is_input_interference(result):
+                result = order_error_result(result)
+            elif result == "已提交复议":
                 state.submitted += 1
                 state.consecutive_failures = 0
             elif result == "复议结果待确认":

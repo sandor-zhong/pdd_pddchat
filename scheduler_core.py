@@ -42,6 +42,7 @@ from typing import Callable
 
 import db
 import memory_monitor
+from order_failures import is_input_interference, next_failure_streak, order_error_result
 
 # 调度器自身不 import paths（避免与店铺路径固化耦合），项目根目录直接取自
 # 本文件位置，与 paths.BASE_DIR 指向同一目录（沿用 run_shops.py 的写法）。
@@ -118,7 +119,8 @@ def _is_failure_result(result_text: str) -> bool:
     "未找到申诉记录"/各种终态跳过（"已申诉-跳过"/"已超时-跳过"/"已驳回-
     跳过"……）不算失败，是正常的业务结果。
     """
-    return result_text.startswith("失败") or result_text.startswith("分析失败")
+    return not is_input_interference(result_text) and (
+        result_text.startswith("失败") or result_text.startswith("分析失败"))
 
 
 def format_duration(seconds: float) -> str:
@@ -975,6 +977,8 @@ class Scheduler:
                     w.processed_count += 1
                     w.order_duration_total += order_duration
                     result_text = resp.get("result", "")
+                    if is_input_interference(result_text):
+                        result_text = order_error_result(result_text)
                     order_no = resp.get("order_no")
                     self._emit(
                         "order_result",
@@ -986,11 +990,9 @@ class Scheduler:
                         remaining=w.remaining,
                         duration_seconds=order_duration,
                     )
-                    if _is_failure_result(result_text):
-                        w.consecutive_failures += 1
-                        shop_failed_too_much = w.consecutive_failures >= self.max_consecutive_errors
-                    else:
-                        w.consecutive_failures = 0
+                    w.consecutive_failures = next_failure_streak(
+                        w.consecutive_failures, result_text, _is_failure_result(result_text))
+                    shop_failed_too_much = w.consecutive_failures >= self.max_consecutive_errors
                 elif rtype == "error":
                     order_duration = time.monotonic() - order_started
                     w.processed_count += 1
@@ -998,6 +1000,8 @@ class Scheduler:
                     w.remaining = max(0, w.remaining - 1)
                     order_no = resp.get("order_no", "?")
                     message = resp.get("message")
+                    if is_input_interference(message):
+                        message = order_error_result(message)
                     self._emit(
                         "order_error",
                         f"[调度器] 店铺 [{shop}] 订单 {order_no} "
@@ -1009,7 +1013,7 @@ class Scheduler:
                         remaining=w.remaining,
                         duration_seconds=order_duration,
                     )
-                    w.consecutive_failures += 1
+                    w.consecutive_failures = next_failure_streak(w.consecutive_failures, message, True)
                     shop_failed_too_much = w.consecutive_failures >= self.max_consecutive_errors
                 else:
                     self._emit(

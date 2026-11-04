@@ -17,6 +17,7 @@ Stealth 反检测 & 拟人化操作模块
 from __future__ import annotations
 
 import random
+from order_failures import InputInterferenceError
 import browser_settings
 import time
 from contextvars import ContextVar
@@ -801,6 +802,8 @@ def human_click(
                           delay=varied_interval(35, 130), timeout=8000)
             page._pdd_mouse_position = (target_x, target_y)
             return
+    except InputInterferenceError:
+        raise  # 人工干预必须结束本单，不能吞掉异常后再次点击。
     except Exception:
         # bounding_box 获取失败 / 页面不在前台 → 保留可靠回退。
         locator.click()

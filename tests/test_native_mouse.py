@@ -45,7 +45,97 @@ class NativeRoutingTests(unittest.TestCase):
             native_mouse._locator_action(
                 locator, "click", position={"x": 10, "y": 15}, delay=80
             )
-        driver.click.assert_called_once_with(locator.page, 130, 245, delay=80)
+        driver.click.assert_called_once()
+        self.assertEqual(driver.click.call_args.args, (locator.page, 130, 245))
+        self.assertEqual(driver.click.call_args.kwargs['delay'], 80)
+        driver.click.call_args.kwargs['_validate']()
+
+    def make_driver(self):
+        driver = object.__new__(native_mouse.WindowsMouse)
+        driver.user, driver.kernel = MagicMock(), MagicMock()
+        driver.user.GetAsyncKeyState.return_value = 0
+        driver.user.SetCursorPos.return_value = 1
+        cursor = [0, 0]
+        def set_position(x, y):
+            cursor[:] = [x, y]
+            return 1
+        def get_position(pointer):
+            pointer._obj.x, pointer._obj.y = cursor
+            return 1
+        driver.user.SetCursorPos.side_effect = set_position
+        driver.user.GetCursorPos.side_effect = get_position
+        driver.user.SendInput.return_value = 2
+        driver.drag_page = driver.drag_owner = None
+        driver.buttons, driver.positions = set(), {}
+        driver.point = MagicMock(return_value=(100, 200))
+        driver.locked = lambda: nullcontext()
+        return driver
+
+    def test_idle_move_releases_system_button_before_cursor_movement(self):
+        driver = self.make_driver()
+        driver.user.GetAsyncKeyState.side_effect = lambda key: 0x8000 if key == 1 else 0
+        driver.move(MagicMock(), 10, 20)
+        names = [c[0] for c in driver.user.mock_calls]
+        self.assertLess(names.index('mouse_event'), names.index('SetCursorPos'))
+        driver.user.mouse_event.assert_called_once_with(4, 0, 0, 0, 0)
+
+    def test_explicit_drag_move_does_not_clear_held_button(self):
+        driver = self.make_driver()
+        page = MagicMock()
+        driver.drag_page = page._impl_obj
+        driver.move(page, 10, 20)
+        driver.user.GetAsyncKeyState.assert_not_called()
+        driver.user.mouse_event.assert_not_called()
+
+    def test_click_sends_down_up_in_one_batch_after_aim_delay(self):
+        driver = self.make_driver()
+        snapshots = []
+        def send(count, events, size):
+            snapshots.append([events[i].value.mi.dwFlags for i in range(count)])
+            self.assertEqual(size, native_mouse.ctypes.sizeof(native_mouse._Input))
+            return count
+        driver.user.SendInput.side_effect = send
+        with patch.object(native_mouse.time, 'sleep') as sleep:
+            driver.click(MagicMock(), 10, 20, delay=80)
+        self.assertEqual(snapshots, [[2, 4]])
+        self.assertIn(unittest.mock.call(0.08), sleep.call_args_list)
+        self.assertIsNone(driver.drag_page)
+        driver.user.mouse_event.assert_not_called()
+
+    def test_partial_input_batch_always_releases_button_and_raises(self):
+        driver = self.make_driver()
+        driver.user.SendInput.return_value = 1
+        with self.assertRaisesRegex(RuntimeError, '未完整发送'):
+            driver.click_pulse('left')
+        driver.user.mouse_event.assert_called_once_with(4, 0, 0, 0, 0)
+
+    def test_external_movement_during_aim_delay_skips_without_clicking(self):
+        from order_failures import InputInterferenceError
+        driver = self.make_driver()
+        def sleep(seconds):
+            if seconds == 0.08:
+                driver.user.SetCursorPos(900, 900)
+        with patch.object(native_mouse.time, 'sleep', side_effect=sleep):
+            with self.assertRaises(InputInterferenceError):
+                driver.click(MagicMock(), 10, 20, delay=80)
+        driver.user.SendInput.assert_not_called()
+
+    def test_changed_target_before_pulse_aborts_instead_of_clicking_wrong_text(self):
+        driver = self.make_driver()
+        with self.assertRaisesRegex(RuntimeError, '目标变化'):
+            driver.click(MagicMock(), 10, 20, _validate=MagicMock(side_effect=RuntimeError('目标变化')))
+        driver.user.SendInput.assert_not_called()
+
+    def test_drag_exception_after_down_still_releases_mouse(self):
+        import captcha
+        page = MagicMock()
+        def wait(_):
+            if page.mouse.down.called:
+                raise RuntimeError('page closed during drag')
+        page.wait_for_timeout.side_effect = wait
+        with self.assertRaisesRegex(RuntimeError, 'page closed'):
+            captcha._human_drag_slider(page, 10, 20, 100)
+        page.mouse.up.assert_called_once()
 
     def test_drag_release_always_sends_button_up(self):
         driver = object.__new__(native_mouse.WindowsMouse)
