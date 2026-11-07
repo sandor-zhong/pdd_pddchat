@@ -108,6 +108,13 @@ class ProcessLineIO(QObject):
                     msg = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if msg.get('type') == 'input_wait':
+                    waiting = msg.get('waiting') is True
+                    if getattr(self, '_input_waiting', False) != waiting:
+                        self._input_waiting = waiting
+                        from ..services.app_logging import logger
+                        logger.warning('[系统鼠标] %s', msg.get('message',''), extra={'remote_run_event': True})
+                    continue
                 if msg.get('type') == 'memory_status':
                     from ..services.app_logging import logger
                     logger.info('[内存回收] %s', msg.get('message',''))
@@ -130,6 +137,8 @@ class ProcessLineIO(QObject):
             for line in self._proc.stderr:
                 with self._stderr_lock:
                     self._stderr_lines.append(line)
+                if line.startswith("[鼠标诊断]"):
+                    self.line_received.emit({"type":"pointer_diagnostic","message":line.strip()})
         except Exception:
             pass
 

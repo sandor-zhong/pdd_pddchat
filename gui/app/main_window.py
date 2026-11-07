@@ -13,6 +13,8 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QStackedWidget,
     QWidget,
+    QDialog,
+    QLabel,
 )
 
 from .pages.auxiliary_queries_page import AuxiliaryQueriesPage
@@ -67,18 +69,85 @@ class MainWindow(QMainWindow):
         self._nav.setCurrentRow(0)
 
         self.statusBar().showMessage(f"主项目目录：{PROJECT_PATHS.root}")
+        self._update_dialog = None
+        help_menu = self.menuBar().addMenu("帮助")
+        stop_action = help_menu.addAction("停止当前任务（Ctrl+Alt+F10）")
+        stop_action.triggered.connect(self._on_stop_shortcut)
+        self._stop_key_label = QLabel("停止快捷键：未注册")
+        self.statusBar().addPermanentWidget(self._stop_key_label)
+        update_action = help_menu.addAction("检查更新")
+        update_action.triggered.connect(lambda: self._check_updates(False))
+        remote_action = help_menu.addAction("远程运行日志")
+        remote_action.triggered.connect(self._show_remote_logs)
+        import update_core
+        if update_core.installed_layout(PROJECT_PATHS.root):
+            QTimer.singleShot(5000, lambda: self._check_updates(True))
 
         # 关闭确认+优雅停止用：轮询定时器存在且在跑，本身就是"正在等待
         # 停止完成"这个状态的标志，不额外加一个布尔标志位。
         self._shutdown_poll_timer: QTimer | None = None
         self._shutdown_wait_started: float = 0.0
 
+    def _show_remote_logs(self):
+        from .dialogs.remote_log_dialog import RemoteLogDialog
+        RemoteLogDialog(self).exec_()
+
+    def install_stop_hotkey(self):
+        from .services.stop_hotkey import SHORTCUT, StopHotkey
+        self._stop_hotkey = StopHotkey(self._on_stop_shortcut)
+        if self._stop_hotkey.register(int(self.winId()), QApplication.instance()):
+            self._stop_key_label.setText("停止当前任务：" + SHORTCUT)
+            self._run_page._append_log("[快捷键] " + SHORTCUT + " 已启用，浏览器在前台也可停止当前任务。")
+        else:
+            self._stop_key_label.setText("全局停止快捷键未启用")
+            self._stop_key_label.setToolTip(self._stop_hotkey.error)
+            self._run_page._append_log("[快捷键] " + self._stop_hotkey.error)
+
+    def _on_stop_shortcut(self):
+        if self._run_page.request_current_stop(reason="停止快捷键 Ctrl+Alt+F10"):
+            self.statusBar().showMessage("已请求停止，等待当前安全步骤结束。", 10000)
+        else:
+            self.statusBar().showMessage("当前没有运行中的任务。", 5000)
+
     def _on_navigation_changed(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
         self._reports_page.set_polling_active(index == 3)
         self._auxiliary_page.set_active(index == 4)
 
+    def _update_busy_reason(self) -> str:
+        if any(dialog.isVisible() and dialog is not self._update_dialog
+               for dialog in self.findChildren(QDialog)):
+            return "请先关闭店铺浏览器、登录或其它操作窗口，再安装更新。"
+        if self._run_page.is_running():
+            return "请先停止申诉、复议或结果查询任务，再安装更新。"
+        if self._shops_page._login_check is not None or self._shops_page._batch_is_running():
+            return "请先结束登录检测或批量登录，再安装更新。"
+        if self._auxiliary_page.is_exporting() or self._run_page.is_exporting_captcha_diagnostics():
+            return "请等待导出完成后安装更新。"
+        import scheduler_core
+        if scheduler_core.active_operation_lock():
+            return "仍有店铺浏览器任务占用运行锁，请先结束该任务。"
+        return ""
+
+    def _check_updates(self, automatic=False):
+        from .dialogs.update_dialog import UpdateDialog
+        dialog = getattr(self, '_update_dialog', None)
+        if dialog and dialog.task and dialog.task.isRunning():
+            if not automatic:
+                dialog.open()
+            return
+        if dialog:
+            dialog.deleteLater()
+        self._update_dialog = UpdateDialog(PROJECT_PATHS.root, self, self._update_busy_reason, automatic=automatic)
+        if not automatic:
+            self._update_dialog.open()
+
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt 覆写方法命名规范)
+        dialog = getattr(self, '_update_dialog', None)
+        if dialog and dialog.task and dialog.task.isRunning():
+            self.statusBar().showMessage("更新检查或下载正在结束，请稍后再关闭程序。")
+            event.ignore()
+            return
         if self._auxiliary_page.is_exporting():
             self.statusBar().showMessage("辅助查询结果正在导出，请完成后再关闭程序。")
             event.ignore()

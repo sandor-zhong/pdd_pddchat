@@ -29,6 +29,26 @@ class FakeIO(QObject):
 
 
 class QuerySinceUiTests(unittest.TestCase):
+    def test_remote_task_progress_tracks_current_assignment_and_queue(self):
+        from gui.app.services import remote_logging
+        page = self.page()
+        with patch.object(remote_logging, "publish_progress") as publish:
+            page._begin_progress_tracking(["A", "B"], "等待开始", "售后申诉")
+            first = publish.call_args.args[0]
+            self.assertEqual(first["task"], "售后申诉")
+            self.assertIsNone(first["shops"][0]["total"])
+            page._run_initial_totals["A"] = 10
+            page._run_remaining["A"] = 4
+            page._run_failed_shops.add("B")
+            page._refresh_run_progress()
+            updated = publish.call_args.args[0]
+            self.assertEqual(updated["shops"][0]["processed"], 6)
+            self.assertTrue(updated["shops"][1]["failed"])
+            page._begin_progress_tracking(["C"], "等待开始", "负向申诉")
+            next_task = publish.call_args.args[0]
+            self.assertNotEqual(first["task_id"], next_task["task_id"])
+            self.assertEqual([s["shop"] for s in next_task["shops"]], ["C"])
+
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])

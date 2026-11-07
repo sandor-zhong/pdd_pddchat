@@ -47,6 +47,8 @@ def setup_logging() -> None:
 
     logger.setLevel(logging.INFO)
     logger.addHandler(handler)
+    from .remote_logging import RemoteLogHandler
+    logger.addHandler(RemoteLogHandler())
     # 不向根 logger 传播——避免万一以后哪个第三方库配置了根 logger 的
     # handler，同一条消息被重复写两遍。
     logger.propagate = False

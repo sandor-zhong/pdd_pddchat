@@ -5,6 +5,31 @@ from order_failures import InputInterferenceError, is_input_interference, next_f
 
 
 class InterferencePolicyTests(unittest.TestCase):
+    def test_init_input_environment_error_does_not_mark_shop_failed(self):
+        import scheduler_core
+        from order_failures import ForegroundUnavailableError
+
+        worker = MagicMock()
+        worker.wait_response.return_value = {
+            'type': 'error',
+            'message': str(ForegroundUnavailableError('[FOREGROUND_UNAVAILABLE] activation denied')),
+        }
+        scheduler = scheduler_core.Scheduler(['A'], rest_enabled=False)
+        with patch.object(scheduler_core, 'ShopWorker', return_value=worker), patch.object(scheduler_core.db, 'mark_shop_daily_failed') as failed:
+            self.assertFalse(scheduler._start_worker('A'))
+        worker.stop.assert_called_once()
+        failed.assert_not_called()
+
+    def test_position_and_target_interruptions_skip_without_human_blame(self):
+        from order_failures import CursorPositionError, DesktopUnavailableError, ForegroundUnavailableError, MouseTargetChangedError
+        for error_type in (CursorPositionError, MouseTargetChangedError, DesktopUnavailableError, ForegroundUnavailableError):
+            with self.subTest(error_type=error_type.__name__):
+                result = order_error_result(error_type('coordinate diagnostic'))
+                self.assertTrue(result.startswith('跳过：系统鼠标操作中断'))
+                self.assertNotIn('外部干预', result)
+                self.assertEqual(order_error_result(result), result)
+                self.assertEqual(next_failure_streak(2, result, True), 2)
+
     def test_negative_scheduler_continues_result_and_error_interruptions_until_real_failure(self):
         import scheduler_core
         import time

@@ -39,7 +39,9 @@
 ; 偶发过的边缘问题，不为了纯展示层的诉求去动已经反复测通的安装机制。
 #define MyAppName "pddchat"
 #define MyAppDisplayName "拼多多申诉"
-#define MyAppVersion "0.1.0"
+#ifndef MyAppVersion
+#define MyAppVersion "0.1.1"
+#endif
 #ifndef BundledBrowser
 #ifndef FirefoxOnly
 #define NoBundledBrowser
@@ -105,6 +107,10 @@ Source: "stage\runtime\*"; DestDir: "{app}\runtime"; Flags: recursesubdirs ignor
 ; 一开始就没有被暂存进这份 stage 目录，见 stage_app.ps1 的说明，这里不需要
 ; 额外写排除规则）。
 Source: "stage\app\*"; DestDir: "{app}\app"; Excludes: ".env,.env.*"; Flags: recursesubdirs ignoreversion
+; Stable bootstrap is updated only by full installers, never by incremental ZIPs.
+Source: "stage\app\update_core.py"; DestDir: "{app}\updater"; Flags: ignoreversion
+Source: "stage\app\update_agent.py"; DestDir: "{app}\updater"; Flags: ignoreversion
+Source: "stage\app\update_launcher.py"; DestDir: "{app}\updater"; Flags: ignoreversion
 ; Chromium 浏览器二进制，build_runtime.ps1 用 PLAYWRIGHT_BROWSERS_PATH
 ; 下载到这里。目标路径必须是 {app}\app\browsers——跟 paths.py 里
 ; `_BUNDLED_BROWSERS_DIR = BASE_DIR / "browsers"` 的计算方式对上
@@ -156,14 +162,14 @@ Name: "desktopicon"; Description: "创建桌面快捷方式(&D)"; GroupDescripti
 ; -m app.main 要求当前工作目录是 gui\ 本身（app 包才能被正确当成顶层模块
 ; 导入），跟开发环境下 `uv run python -m app.main` 是同一种跑法。
 Name: "{group}\{#MyAppDisplayName}"; Filename: "{app}\runtime\gui\pythonw.exe"; \
-    Parameters: "-m app.main"; WorkingDir: "{app}\app\gui"; \
+    Parameters: """{app}\updater\update_launcher.py"""; WorkingDir: "{app}\app\gui"; \
     IconFilename: "{app}\app_icon.ico"; Comment: "拼多多商家申诉工具"
 Name: "{group}\{cm:UninstallProgram,{#MyAppDisplayName}}"; Filename: "{uninstallexe}"
 ; 安装器使用 PrivilegesRequired=lowest，只能写当前用户桌面。{commondesktop}
 ; 指向所有用户的公共桌面，需要管理员权限，会在普通账号上触发
 ; IPersistFile::Save / 0x80070005（拒绝访问）。
 Name: "{userdesktop}\{#MyAppDisplayName}"; Filename: "{app}\runtime\gui\pythonw.exe"; \
-    Parameters: "-m app.main"; WorkingDir: "{app}\app\gui"; \
+    Parameters: """{app}\updater\update_launcher.py"""; WorkingDir: "{app}\app\gui"; \
     IconFilename: "{app}\app_icon.ico"; Tasks: desktopicon; Comment: "拼多多商家申诉工具"
 
 [Run]
@@ -200,7 +206,7 @@ Filename: "{tmp}\VC_redist.x64.exe"; Parameters: "/install /quiet /norestart"; \
 ; 浏览器已经在构建阶段随包打进 [Files] 的 stage\browsers\ 里了（见上），
 ; 安装阶段不需要再联网下载任何东西——这里只剩"安装完成页给同事一个立即
 ; 启动的勾选项"，体验上更接近真正的"装完就能直接用"。
-Filename: "{app}\runtime\gui\pythonw.exe"; Parameters: "-m app.main"; \
+Filename: "{app}\runtime\gui\pythonw.exe"; Parameters: """{app}\updater\update_launcher.py"""; \
     WorkingDir: "{app}\app\gui"; Description: "立即启动 {#MyAppDisplayName}"; \
     Flags: postinstall skipifsilent nowait
 
@@ -238,7 +244,7 @@ begin
       '    "pddchat_root": "..",' + #13#10 +
       '    "pddchat_python": "..\\..\\runtime\\pipeline\\python.exe"' + #13#10 +
       '}';
-    if not SaveStringToFile(ConfigPath, ConfigContent, False) then
+    if not FileExists(ConfigPath) and not SaveStringToFile(ConfigPath, ConfigContent, False) then
       MsgBox('生成 gui\config.json 失败，安装可能不完整，请联系技术支持。' + #13#10 +
              '目标路径：' + ConfigPath, mbError, MB_OK);
   end;

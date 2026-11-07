@@ -395,7 +395,7 @@ class ShopWorker:
                 with self._stderr_lock:
                     self._stderr_lines.append(line)
                 callback = getattr(self, "diagnostic_callback", None)
-                if callback is not None and line.startswith("[验证码诊断]"):
+                if callback is not None and line.startswith(("[验证码诊断]", "[鼠标诊断]")):
                     callback(line.strip())
         except (OSError, ValueError):
             # 进程收尾时管道可能先被关闭；已有诊断仍然可以正常读取。
@@ -457,12 +457,33 @@ class ShopWorker:
         超时，GUI 点"停止"也能在至多 1 秒内让这次等待提前返回。
         """
         deadline = time.monotonic() + timeout
+        waiting = False
+        wait_lease = 0.0
+        last_tick = time.monotonic()
         while True:
+            now = time.monotonic()
+            # Only live input-wait heartbeats suspend the business timeout.
+            # A silent or hung child still times out after its short lease.
+            if waiting:
+                deadline += max(0.0, min(now, wait_lease) - last_tick)
+            last_tick = now
+            if stop_event is not None and stop_event.is_set():
+                return None
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
             try:
-                return self.out_queue.get(timeout=min(remaining, 1.0))
+                message = self.out_queue.get(timeout=min(remaining, 1.0))
+                if message.get('type') == 'input_wait':
+                    was_waiting = waiting
+                    waiting = message.get('waiting') is True
+                    wait_lease = time.monotonic() + 3 if waiting else 0.0
+                    if waiting != was_waiting:
+                        callback = getattr(self, 'diagnostic_callback', None)
+                        if callback is not None:
+                            callback('[系统鼠标] ' + str(message.get('message', '')))
+                    continue
+                return message
             except queue.Empty:
                 if not self.alive:
                     return None
@@ -696,7 +717,8 @@ class Scheduler:
                 duration_seconds=duration,
             )
             w.stop()
-            db.mark_shop_daily_failed(shop, str(message or ""))
+            if not is_input_interference(message):
+                db.mark_shop_daily_failed(shop, str(message or ""))
             return False
 
         w.remaining = resp.get("queue_size", 0)

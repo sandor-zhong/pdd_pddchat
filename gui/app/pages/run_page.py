@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 from datetime import date, datetime
 
 from PyQt5.QtCore import Qt, QDateTime, QThread, QTime, QTimer, pyqtSignal
@@ -1073,9 +1074,15 @@ class RunPage(PipelineMixin, QWidget):
     def begin_shutdown_stop(self) -> None:
         """GUI 要关闭、且当前有任务在跑时调用——跟点"优雅停止"按钮走
         同一条路径，不新增停止逻辑本身，只是换了个调用入口。"""
+        self.request_current_stop(reason="GUI 关闭")
+
+    def request_current_stop(self, reason: str = "用户操作") -> bool:
+        """Shared safe cancellation for the stop shortcut, menu and GUI shutdown."""
+        if not self.is_running():
+            return False
         if self._pipeline_active:
             self._pipeline_cancelled = True
-        self._request_stop(reason="GUI 关闭")
+        self._request_stop(reason=reason)
         if self._check_results_worker is not None:
             self._check_results_worker.cancel()
         if self._check_reconsider_results_worker is not None:
@@ -1083,9 +1090,10 @@ class RunPage(PipelineMixin, QWidget):
         if self._check_aftersale_results_worker is not None:
             self._check_aftersale_results_worker.cancel()
         if self._reconsider_worker is not None:
-            self._request_reconsider_stop(reason="GUI 关闭")
+            self._request_reconsider_stop(reason=reason)
         if self._aftersale_worker is not None:
-            self._request_aftersale_stop(reason="GUI 关闭")
+            self._request_aftersale_stop(reason=reason)
+        return True
 
     # ---- 发起复议 ----
 
@@ -1172,7 +1180,7 @@ class RunPage(PipelineMixin, QWidget):
             f"[GUI] 开始发起复议：{len(shops)} 家店铺，"
             f"浏览器池 {pool_size} 家，每店最多 {max_orders} 条，逐单轮转，真实提交"
         )
-        self._begin_progress_tracking(shops, "等待扫描")
+        self._begin_progress_tracking(shops, "等待扫描", "发起复议")
         self._start_button.setEnabled(False)
         self._check_results_button.setEnabled(False)
         self._check_reconsider_results_button.setEnabled(False)
@@ -1196,6 +1204,7 @@ class RunPage(PipelineMixin, QWidget):
         self._reconsider_worker.shop_started.connect(self._on_reconsider_shop_started)
         self._reconsider_worker.shop_progress.connect(self._on_reconsider_shop_progress)
         self._reconsider_worker.shop_activity.connect(self._on_shop_activity)
+        self._reconsider_worker.diagnostic_line.connect(self._append_log)
         self._reconsider_worker.browser_focus_result.connect(self._on_browser_focus_result)
         self._reconsider_worker.shop_order_result.connect(
             self._on_reconsider_shop_order_result
@@ -1344,6 +1353,8 @@ class RunPage(PipelineMixin, QWidget):
         return row
 
     def _on_shop_activity(self, shop: str, stage: str, order_no: str) -> None:
+        task = "售后申诉" if self._aftersale_worker else "发起复议"
+        self._append_log(f"店铺 [{shop}] 订单 {order_no}：{stage}", shop=shop, task=task)
         detail = f"{stage}｜{order_no}" if order_no else stage
         self._set_reconsider_status(shop, detail, self._status_table.item(
             self._ensure_status_row(shop), 2
@@ -1523,7 +1534,7 @@ class RunPage(PipelineMixin, QWidget):
         self._aftersale_succeeded = 0
         self._aftersale_failed = 0
         self._aftersale_stopping = False
-        self._begin_progress_tracking(shops, "等待浏览器名额")
+        self._begin_progress_tracking(shops, "等待浏览器名额", "售后申诉")
         self._aftersale_submit_button.setEnabled(False)
         self._stop_aftersale_button.setText("停止售后申诉")
         self._stop_aftersale_button.setEnabled(True)
@@ -1552,6 +1563,7 @@ class RunPage(PipelineMixin, QWidget):
         self._aftersale_worker.shop_started.connect(self._on_aftersale_shop_started)
         self._aftersale_worker.shop_progress.connect(self._on_aftersale_shop_progress)
         self._aftersale_worker.shop_activity.connect(self._on_shop_activity)
+        self._aftersale_worker.diagnostic_line.connect(self._append_log)
         self._aftersale_worker.browser_focus_result.connect(self._on_browser_focus_result)
         self._aftersale_worker.shop_order_result.connect(
             self._on_aftersale_shop_order_result
@@ -1797,7 +1809,7 @@ class RunPage(PipelineMixin, QWidget):
         prefix = "定时" if source == "定时" else "GUI"
         self._append_log(f"[{prefix}] 开始查询申诉结果：{len(shops)} 家店铺")
         self._append_log(f"[结果回查] 提交时间：{self._result_query_since() or '不限制'}（北京时间；本批次固定使用此范围）")
-        self._begin_progress_tracking(shops, "等待查询")
+        self._begin_progress_tracking(shops, "等待查询", "查询申诉结果")
         self._check_results_total_updated = 0
         self._check_results_skipped.clear()
         self._check_results_errors.clear()
@@ -1989,7 +2001,7 @@ class RunPage(PipelineMixin, QWidget):
         self._check_reconsider_result_counts = {}
         self._append_log(f"[查询复议结果] 开始：{len(shops)} 家店铺")
         self._append_log(f"[结果回查] 提交时间：{self._result_query_since() or '不限制'}（北京时间；本批次固定使用此范围）")
-        self._begin_progress_tracking(shops, "等待查询")
+        self._begin_progress_tracking(shops, "等待查询", "查询复议结果")
         self._check_reconsider_results_button.setEnabled(False)
         self._check_results_button.setEnabled(False)
         self._reconsider_button.setEnabled(False)
@@ -2202,7 +2214,7 @@ class RunPage(PipelineMixin, QWidget):
             f"[查询售后结果] 开始：{len(shops)} 家店铺；"
             f"翻页、详情及店铺切换间隔 {query_interval} 秒"
         )
-        self._begin_progress_tracking(shops, "等待查询")
+        self._begin_progress_tracking(shops, "等待查询", "查询售后结果")
         self._check_aftersale_results_button.setEnabled(False)
         self._aftersale_query_interval_spin.setEnabled(False)
         self._check_results_button.setEnabled(False)
@@ -2717,7 +2729,7 @@ class RunPage(PipelineMixin, QWidget):
         memory_monitor.increment_runtime_metric('scheduler_events_processed')
         self._track_run_progress(event)
         if event.line:
-            self._append_log(event.line)
+            self._append_log(event.line, shop=event.shop or "", task="负向申诉")
 
         if event.shop is not None:
             self._update_status_row(event)
@@ -2730,7 +2742,7 @@ class RunPage(PipelineMixin, QWidget):
             }:
                 self._release_topmost_browser(event.shop)
 
-    def _append_log(self, text: str) -> None:
+    def _append_log(self, text: str, *, shop: str = "", task: str = "") -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
         raw_text = str(text)
         self._max_log_event_chars_seen = max(
@@ -2752,9 +2764,12 @@ class RunPage(PipelineMixin, QWidget):
         # 界面上的 QPlainTextEdit 只是内存态展示（还限了最多
         # _LOG_MAX_BLOCKS 行），同步写一份到落盘日志——运营出问题时
         # 才有东西能发给开发排查，不依赖软件还开着、还没滚动超限。
-        logger.info(_limit_log_text(raw_text, _LOG_FILE_MAX_CHARS_PER_EVENT))
+        logger.info(
+            _limit_log_text(raw_text, _LOG_FILE_MAX_CHARS_PER_EVENT),
+            extra={"remote_run_event": True, "remote_shop": shop, "remote_task": task},
+        )
 
-    def _begin_progress_tracking(self, shops: list[str], initial_status: str) -> None:
+    def _begin_progress_tracking(self, shops: list[str], initial_status: str, task: str = "负向申诉") -> None:
         """为任意一种店铺批量任务重置同一套进度界面。"""
         self._result_check_skipped.clear()
         self._result_check_issues.clear()
@@ -2762,6 +2777,10 @@ class RunPage(PipelineMixin, QWidget):
         self._row_index.clear()
         self._browser_buttons.clear()
         self._run_shops = list(shops)
+        self._run_skipped_today = set()
+        self._remote_task_id = uuid.uuid4().hex
+        self._remote_task_name = task
+        self._remote_task_started = time.time()
         self._run_terminal_shops.clear()
         self._run_failed_shops.clear()
         self._run_initial_totals.clear()
@@ -2793,6 +2812,16 @@ class RunPage(PipelineMixin, QWidget):
         """把调度器事件折算成界面进度。只处理批量申诉调度事件，
         复议/结果回查各自的 worker 信号不会进入这里。
         """
+        if event.type == 'round_skip_done':
+            skipped = set(event.data.get('shops', [])) & set(self._run_shops)
+            self._run_skipped_today = getattr(self, '_run_skipped_today', set()) | skipped
+            for name in skipped:
+                self._run_terminal_shops.add(name)
+                self._run_initial_totals[name] = 0
+                self._run_remaining[name] = 0
+                self._set_reconsider_status(name, '今日已完成，本轮跳过', '0')
+            self._refresh_run_progress()
+            return
         shop = event.shop
         if shop is None or shop not in self._run_shops:
             return
@@ -2891,6 +2920,32 @@ class RunPage(PipelineMixin, QWidget):
             f"已运行 {scheduler_core.format_duration(elapsed)}  ｜  "
             f"预计剩余 {eta_text}"
         )
+        from ..services.remote_logging import publish_progress
+
+        shops = []
+        for shop in self._run_shops:
+            initial = self._run_initial_totals.get(shop)
+            remaining = self._run_remaining.get(shop)
+            row = self._row_index.get(shop)
+            status = self._status_table.item(row, 1).text() if row is not None else "等待开始"
+            shops.append({
+                "shop": shop, "total": initial, "remaining": remaining,
+                "processed": max(0, initial - remaining) if initial is not None and remaining is not None else None,
+                "checked": self._run_checked_by_shop.get(shop, 0),
+                "terminal": shop in self._run_terminal_shops,
+                "failed": shop in self._run_failed_shops,
+                "skipped_today": shop in getattr(self, '_run_skipped_today', set()),
+                "status": status,
+            })
+        publish_progress({
+            "task_id": getattr(self, "_remote_task_id", ""),
+            "task": getattr(self, "_remote_task_name", "负向申诉"),
+            "started": getattr(self, "_remote_task_started", None),
+            "finished": self._run_finished_elapsed is not None,
+            "progress": progress, "processed": self._run_processed_orders,
+            "elapsed": elapsed, "eta": self._run_eta_seconds,
+            "shops": shops,
+        })
 
     def _on_open_log_folder_clicked(self) -> None:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -2947,6 +3002,7 @@ class RunPage(PipelineMixin, QWidget):
         if event.type == "shop_activity":
             stage = str(event.data.get("stage") or "正在处理")
             order_no = str(event.data.get("order_no") or "")
+            self._append_log(f"店铺 [{shop}] 订单 {order_no}：{stage}", shop=shop, task="负向申诉")
             status_text = f"{stage}｜{order_no}" if order_no else stage
         if status_text is not None:
             self._status_table.item(row, 1).setText(status_text)

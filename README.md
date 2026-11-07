@@ -1,5 +1,9 @@
 # 拼多多商家申诉批量处理工具
 
+## 在线增量更新
+
+安装版提供“帮助 → 检查更新”，使用签名清单和 SHA256 校验发布文件，增量更新失败时回滚。任务运行中不安装更新，本地账号、登录态、订单和配置保留。首次需覆盖安装带更新器的完整版本。构建、签名、服务器上传顺序和密钥备份见[增量更新发布说明](docs/incremental_updates.md)。
+
 ## 提示词离线测试
 
 项目根目录提供 `test_negative_prompt.py`（负向）、`test_reconsideration_prompt.py`（复议）、`test_aftersale_prompt.py`（售后）三个入口。例：`.\.venv\Scripts\python.exe test_negative_prompt.py --count 20`，将 `20` 改为 `50` 可测试50单。默认测试当前正式提示词，自动输出新旧话术对比 Excel、原始聊天及提示词快照；不打开浏览器、不提交申诉、不写业务数据库。
@@ -24,7 +28,7 @@ uv sync
 
 Firefox 使用 Playwright 配套版本，普通安装的 Firefox 不能直接用于此项目。开发环境执行 `uv run playwright install firefox`；Firefox 安装包内已带配套浏览器。Firefox 的表单输入使用浏览器原生填充并校验完整内容；Chrome 保留原来的剪贴板粘贴。
 
-默认打包：运行 `./packaging/build_installer.ps1`，自动裁剪暂存运行时、更新源码并生成精简安装包，输出至项目根目录 `dist/pddchatSetup-0.1.0-lite.exe`。首次打包需先运行 `./packaging/build_runtime.ps1` 准备运行时；编译器未自动找到时用 `-CompilerPath` 指定 `ISCC.exe` 路径。`dist/` 已被 Git 忽略。
+默认打包：运行 `./packaging/build_installer.ps1`，自动裁剪暂存运行时、更新源码、生成版本清单并构建精简安装包，输出至项目根目录 `dist/pddchatSetup-<版本>-lite.exe`，版本来自 `release_config.json`。首次打包需先准备发布密钥（见增量更新文档），并运行 `./packaging/build_runtime.ps1` 准备运行时；编译器未自动找到时用 `-CompilerPath` 指定 `ISCC.exe` 路径。`dist/` 已被 Git 忽略。
 
 直接编译 `packaging/pddchat.iss` 也默认生成精简版到根目录 `dist/`。完整 Chromium 版需显式传入 `/DBundledBrowser`。Firefox 版：先运行 `packaging/build_runtime.ps1 -BrowserEngine firefox`、`packaging/stage_app.ps1`，随后给 Inno Setup 编译器传入 `/DFirefoxOnly`。
 
@@ -295,6 +299,10 @@ python main.py --submit --orders 260805-552620593590168
 | REJECTED | 状态文本含"申诉未通过"（申诉过但没通过、已被处罚） | 跳过 |
 
 以上"跳过"类状态的识别标记集中在 `appeal_submit.py` 的 `TERMINAL_STATUS_MARKERS` 字典里，新增一种只需要在那加一行（`main.py` 对应的 `_TERMINAL_STATUSES` 字典也加一行），不用改判断逻辑本身。
+
+## 图形化发布工具
+
+双击项目根目录的 `launch_publisher.cmd`，填写版本号和更新说明，即可构建并通过 SSH/SFTP 自动上传。日常发布使用一份通用代码包，无需选择旧版本基线；完整发布用于首次安装和环境变化。支持仅生成发布包、上传失败重试和 HTTPS 发布验证。详细说明见 [发布工具使用说明](docs/publisher_tool.md)。
 
 ## 输出文件
 

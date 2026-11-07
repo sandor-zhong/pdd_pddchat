@@ -744,6 +744,13 @@ def human_click(
         locator:          目标元素 Locator
         move_before_click: 是否先走一遍鼠标轨迹（关掉则为带延时的直接点击）
     """
+    if getattr(page.context, "_system_mouse_enabled", False) is True:
+        # Native locator routing activates/maximizes, scrolls, remeasures and
+        # validates the element immediately before its slow OS-mouse movement.
+        # Do not replay a separate curve built from cached viewport coordinates.
+        business_pause(page)
+        locator.click(timeout=8000)
+        return
     if not move_before_click:
         business_pause(page)
         human_delay(50, 200)
@@ -787,9 +794,9 @@ def human_click(
                 page.mouse.move(x, y)
                 # 接近终点时略微减速（模拟瞄准动作）
                 if i > steps * 0.7:
-                    time.sleep(varied_interval(12, 35) / 1000)
+                    time.sleep(varied_interval(65, 100) / 1000)
                 else:
-                    time.sleep(varied_interval(3, 15) / 1000)
+                    time.sleep(varied_interval(40, 70) / 1000)
 
             # 微调保持在目标内部；最终由 Locator 执行可点击性检查。
             for _ in range(random.randint(1, 3)):

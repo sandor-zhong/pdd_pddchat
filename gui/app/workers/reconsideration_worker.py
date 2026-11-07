@@ -34,6 +34,7 @@ class ReconsiderationWorker(QObject):
     _topmost_requested = pyqtSignal(str, bool)
     browser_focus_result = pyqtSignal(str, bool)
     shop_activity = pyqtSignal(str, str, str)
+    diagnostic_line = pyqtSignal(str)
     shop_started = pyqtSignal(str)
     shop_progress = pyqtSignal(str, str, int, int)
     shop_order_result = pyqtSignal(str, str, str, int)
@@ -170,6 +171,9 @@ class ReconsiderationWorker(QObject):
             return
         state = self._states[shop]
         message_type = message.get("type")
+        if message_type == 'pointer_diagnostic':
+            self.diagnostic_line.emit(f"[发起复议][{shop}] {message.get('message','')}")
+            return
 
         if message_type == "activity":
             self.shop_activity.emit(

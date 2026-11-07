@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import random
 import re
+import uuid
 from pathlib import Path
 
 from playwright.sync_api import Locator, Page
@@ -98,17 +99,21 @@ def save_error_screenshot(
 
     screenshot_path = (
         DEBUG_DIR
-        / f"error_{safe_filename(order_no)}.png"
+        / f"error_{safe_filename(order_no)}_{uuid.uuid4().hex[:12]}.png"
     )
 
     try:
         page.screenshot(
             path=str(screenshot_path),
-            full_page=True,
+            full_page=False,
         )
+        match = re.search(r'\d{6}-\d{10,}',order_no)
+        if match:
+            from native_mouse import pointer_diagnostic
+            pointer_diagnostic('error_screenshot',order_no=match.group(),screenshot_path=str(screenshot_path.resolve()))
         return screenshot_path
 
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - preserve the original order failure if capture fails
         # 保留 traceback 便于定位（P1 顺路清理）
         import traceback
 

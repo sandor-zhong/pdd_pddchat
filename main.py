@@ -933,6 +933,8 @@ def process_and_submit_one_order(
             )
             print(f"  订单 {order_no} 分析完成 → {label}")
         except Exception as exc:
+            from native_mouse import pointer_error_diagnostic
+            pointer_error_diagnostic(exc, order_no)
             print(f"  订单 {order_no} {order_error_result(exc, '分析失败: ')}，停止本单提交")
             shot = save_error_screenshot(chat_page, order_no)
             db.record_analysis_failed(
@@ -1069,7 +1071,29 @@ def run_serve_mode(
     order_issues: dict[str, str] = {}
     next_index = 0
 
-    for raw_line in sys.stdin:
+    stop_event = threading.Event()
+    command_lines: queue.Queue[str | None] = queue.Queue()
+    from native_mouse import configure_input_wait
+    configure_input_wait(stop_event, emit)
+
+    def read_serve_commands():
+        try:
+            for line in sys.stdin:
+                try:
+                    if json.loads(line).get("cmd") == "stop":
+                        stop_event.set()
+                except (ValueError, AttributeError):
+                    pass
+                command_lines.put(line)
+        finally:
+            stop_event.set()
+            command_lines.put(None)
+
+    threading.Thread(target=read_serve_commands, daemon=True).start()
+    while True:
+        raw_line = command_lines.get()
+        if raw_line is None or stop_event.is_set():
+            break
         raw_line = raw_line.strip()
         if not raw_line:
             continue
@@ -1174,6 +1198,7 @@ def run_serve_mode(
         else:
             emit({"type": "error", "stage": "protocol", "message": f"未知指令: {cmd!r}"})
 
+    configure_input_wait()
     if context is not None:
         try:
             context.close()
@@ -1478,6 +1503,8 @@ def run_reconsideration_serve_mode(
 
     command_queue: "queue.Queue[dict]" = queue.Queue()
     stop_event = threading.Event()
+    from native_mouse import configure_input_wait
+    configure_input_wait(stop_event, emit)
 
     def read_commands() -> None:
         try:
@@ -1654,6 +1681,7 @@ def run_reconsideration_serve_mode(
                 "message": f"未知指令: {cmd!r}",
             })
     finally:
+        configure_input_wait()
         if context is not None:
             try:
                 context.close()
@@ -1862,6 +1890,8 @@ def run_aftersale_serve_mode(
 
     command_queue: queue.Queue[dict] = queue.Queue()
     stop_event = threading.Event()
+    from native_mouse import configure_input_wait
+    configure_input_wait(stop_event, emit)
 
     def read_commands() -> None:
         try:
@@ -2019,6 +2049,7 @@ def run_aftersale_serve_mode(
                 "message": f"未知指令: {cmd!r}",
             })
     finally:
+        configure_input_wait()
         if context is not None:
             try:
                 context.close()

@@ -1,5 +1,6 @@
 import io
 import json
+import queue
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -9,11 +10,23 @@ from aftersale_appeal import AftersaleAppealSession
 
 class ResumeTests(unittest.TestCase):
     def test_normal_appeal_resume_uses_only_saved_remaining_queue(self):
-        commands=[{'cmd':'init','resume':{'order_numbers':['remaining-2','remaining-3'],'order_issues':{}}},
-                  {'cmd':'next'},{'cmd':'stop'}]
-        output=io.StringIO()
+        class CommandInput:
+            def __init__(self): self.commands=queue.Queue()
+            def __iter__(self): return self
+            def __next__(self): return self.commands.get()
+            def put(self,value): self.commands.put(json.dumps(value)+'\n')
+        command_input=CommandInput()
+        command_input.put({'cmd':'init','resume':{'order_numbers':['remaining-2','remaining-3'],'order_issues':{}}})
+        command_input.put({'cmd':'next'})
+        class ProtocolOutput(io.StringIO):
+            def write(self,line):
+                result=super().write(line)
+                if json.loads(line).get('type') in ('result','error'):
+                    command_input.put({'cmd':'stop'})
+                return result
+        output=ProtocolOutput()
         context=MagicMock()
-        with patch('main.sys.stdin',io.StringIO('\n'.join(json.dumps(c) for c in commands))), \
+        with patch('main.sys.stdin',command_input), \
              patch('main.create_stealth_context',return_value=context), \
              patch('main.wait_for_login'), patch('main._get_or_create_role_page'), \
              patch('main.set_give_up_after_auto_solve_fails'), patch('main.run_phase1') as scan, \

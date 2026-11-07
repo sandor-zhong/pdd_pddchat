@@ -25,6 +25,7 @@ from login import (
     get_query_button,
     wait_for_login,
 )
+from native_mouse import pointer_diagnostic, prepare_system_mouse_page
 from paths import (
     DEFAULT_ORDER_NO,
     EVIDENCE_DIR,
@@ -1170,6 +1171,169 @@ def wait_for_chat_images(page: Page) -> None:
         )
 
 
+_CHAT_CAPTURE_SETUP = r"""
+(list) => {
+    const root = document.scrollingElement || document.documentElement;
+    const scrollable = node => {
+        const style = getComputedStyle(node);
+        return /^(auto|scroll|overlay)$/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 2;
+    };
+    let scroller = list;
+    while (scroller && scroller !== document.body && scroller !== root && !scrollable(scroller)) scroller = scroller.parentElement;
+    if (!scroller || scroller === document.body || scroller === root) scroller = root;
+    const isPage = scroller === root;
+    const rect = node => {
+        const r = node.getBoundingClientRect();
+        return {left:r.left,top:r.top,right:r.right,bottom:r.bottom,width:r.width,height:r.height};
+    };
+    const intersect = (a,b) => ({left:Math.max(a.left,b.left),top:Math.max(a.top,b.top),right:Math.min(a.right,b.right),bottom:Math.min(a.bottom,b.bottom)});
+    const viewport = () => {
+        const v=window.visualViewport;
+        const left=v ? v.offsetLeft : 0, top=v ? v.offsetTop : 0;
+        const width=document.compatMode==='CSS1Compat' ? document.documentElement.clientWidth : innerWidth;
+        const height=document.compatMode==='CSS1Compat' ? document.documentElement.clientHeight : innerHeight;
+        return {left,top,right:Math.min(innerWidth,width,left+(v ? v.width : innerWidth)),
+            bottom:Math.min(innerHeight,height,top+(v ? v.height : innerHeight))};
+    };
+    const visible = () => {
+        let view=intersect(rect(list),viewport());
+        for (let node=list;node;node=node.parentElement) {
+            const s=getComputedStyle(node),r=rect(node);
+            if (/^(auto|scroll|overlay|hidden|clip)$/.test(s.overflowX)) {
+                view.left=Math.max(view.left,r.left+node.clientLeft);
+                view.right=Math.min(view.right,r.left+node.clientLeft+node.clientWidth);
+            }
+            if (/^(auto|scroll|overlay|hidden|clip)$/.test(s.overflowY)) {
+                view.top=Math.max(view.top,r.top+node.clientTop);
+                view.bottom=Math.min(view.bottom,r.top+node.clientTop+node.clientHeight);
+            }
+        }
+        return view;
+    };
+    const wheelOwner = el => {
+        for(let n=el;n && n!==document.body && n!==root;n=n.parentElement) if(scrollable(n)) return n;
+        return root;
+    };
+    const target = (view,owner,requireList) => {
+        if(view.right-view.left<6 || view.bottom-view.top<6) return null;
+        for(const fy of [0.5,0.15,0.85,0.03,0.97]) for(const fx of [0.5,0.15,0.85,0.03,0.97]) {
+            const x=view.left+(view.right-view.left)*fx, y=view.top+(view.bottom-view.top)*fy;
+            const hit=document.elementFromPoint(x,y);
+            if(hit && (!requireList || list.contains(hit)) && wheelOwner(hit)===owner) return {x,y};
+        }
+        return null;
+    };
+    window.__pddNaturalChatScroller=scroller;
+    window.__pddChatCapture={read:() => {
+        const v=viewport(),box=rect(list),view=visible(),host=rect(isPage ? list : scroller);
+        const pageMax=Math.max(0,root.scrollHeight-(v.bottom-v.top));
+        const clamp=n=>Math.max(0,Math.min(pageMax,n));
+        const items=list.querySelectorAll('.message-item');
+        const first=items.length ? rect(items[0]) : box;
+        const last=items.length ? rect(items[items.length-1]) : box;
+        const start=isPage ? clamp(root.scrollTop+first.top-v.top-8) : 0;
+        const end=isPage ? clamp(root.scrollTop+last.bottom-v.bottom+2) : Math.max(0,scroller.scrollHeight-scroller.clientHeight);
+        let reveal=0;
+        // Move the page only when it substantially clips the chat host. A
+        // fully visible short conversation requires no forced top alignment.
+        if(host.top>v.top+8 && host.bottom>v.bottom+4) reveal=host.top-v.top-8;
+        else if(host.bottom<=v.top || (host.top<v.top-4 && host.height<=v.bottom-v.top)) reveal=host.top-v.top-8;
+        reveal=clamp(root.scrollTop+reveal)-root.scrollTop;
+        return {box:{x:box.left,y:box.top,width:box.width,height:box.height},viewport:{left:v.left,top:v.top,width:v.right,height:v.bottom},
+            view,target:target(view,scroller,true),revealTarget:target(v,root,false),reveal,
+            endReveal:Math.max(0,clamp(root.scrollTop+last.bottom-v.bottom+2)-root.scrollTop),
+            atStart:first.top>=view.top-1 && first.top<view.bottom-1,
+            atEnd:last.bottom<=view.bottom+1 && last.bottom>view.top,
+            pageTop:root.scrollTop,kind:isPage ? 'page' : 'element',
+            state:{top:scroller.scrollTop,start,max:end,height:Math.max(0,view.bottom-view.top),clientHeight:scroller.clientHeight,scrollHeight:scroller.scrollHeight}};
+    }};
+    return window.__pddChatCapture.read();
+}
+"""
+
+
+def _chat_capture_geometry(page):
+    return page.evaluate("() => window.__pddChatCapture.read()")
+
+
+def _aim_chat_scroll(page, order_no, page_number, *, reveal=False):
+    # Only retry a move rejected before cursor movement; never replay a click.
+    for attempt in range(3):
+        prepare_system_mouse_page(page)
+        info = _chat_capture_geometry(page)
+        target = info["revealTarget" if reveal else "target"]
+        if not target:
+            if attempt < 2:
+                human_delay(150, 250)
+                continue
+            pointer_diagnostic(
+                "chat_target_unavailable",
+                order_no=order_no,
+                page_number=page_number,
+                box=info["box"],
+                viewport=info["viewport"],
+                scroller=info["state"],
+                visible_intersection=info["view"],
+                reveal=reveal,
+            )
+            raise RuntimeError("聊天区域没有可见且未被遮挡的安全滚动位置，已停止截图。")
+        pointer_diagnostic(
+            "chat_scroll_target",
+            order_no=order_no,
+            page_number=page_number,
+            box=info["box"],
+            viewport=info["viewport"],
+            scroller=info["state"],
+            kind=info["kind"],
+            visible_intersection=info["view"],
+            target=target,
+            reveal=reveal,
+        )
+        try:
+            page.mouse.move(target["x"], target["y"])
+        except RuntimeError as error:
+            if "鼠标目标位于浏览器可视区域之外" not in str(error) or attempt == 2:
+                raise
+            continue
+        current = _chat_capture_geometry(page)
+        if current["view"] == info["view"] and current["viewport"] == info["viewport"]:
+            return current
+    raise RuntimeError("聊天区域布局持续变化，未发送滚轮操作，已停止当前页截图。")
+
+
+def _prepare_chat_capture(page, message_list, order_no, page_number):
+    prepare_system_mouse_page(page)
+    message_list.evaluate(_CHAT_CAPTURE_SETUP)
+    stalled = 0
+    for _ in range(60):
+        info = _chat_capture_geometry(page)
+        reveal = abs(info["reveal"]) > 4 and info.get("revealTarget") is not None
+        delta = (
+            info["reveal"] if reveal else info["state"]["start"] - info["state"]["top"]
+        )
+        if not reveal and info["atStart"]:
+            return _aim_chat_scroll(page, order_no, page_number)
+        if not reveal and abs(delta) < 12:
+            delta = -12 if delta <= 0 else 12
+        _aim_chat_scroll(page, order_no, page_number, reveal=reveal)
+        # One wheel event per fresh hit test. Splitting a page scroll into
+        # several events can move an inner panel underneath the stationary
+        # cursor and accidentally scroll both the page and chat container.
+        human_scroll(page, max(-320, min(320, delta)), 1, 1)
+        human_delay(100, 200)
+        after = _chat_capture_geometry(page)
+        progressed = (
+            abs(after["pageTop"] - info["pageTop"]) > 1
+            or abs(after["state"]["top"] - info["state"]["top"]) > 1
+        )
+        stalled = 0 if progressed else stalled + 1
+        if stalled >= 3:
+            raise RuntimeError(
+                "聊天区域连续三次未能滚动到起始可见位置，已停止截图，避免漏采消息。"
+            )
+    raise RuntimeError("聊天区域未能在有限滚动次数内就绪，已停止截图。")
+
+
 def save_page_evidence_screenshot(
     page: Page,
     order_no: str,
@@ -1183,75 +1347,24 @@ def save_page_evidence_screenshot(
     页内消息序号及完整可见范围，供后续优先选择一张、最多两张连续原图。
     """
 
-    screenshot_dir = (
-        EVIDENCE_DIR
-        / safe_filename(order_no)
-        / run_id
-    )
+    screenshot_dir = EVIDENCE_DIR / safe_filename(order_no) / run_id
 
     screenshot_dir.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    message_list = page.locator(
-        ".new-message-list"
-    )
+    message_list = page.locator(".new-message-list")
 
     message_list.wait_for(
         state="visible",
         timeout=20_000,
     )
 
-    message_list.evaluate(
-        """
-        (list) => {
-            const scrollable = (node) => {
-                const style = getComputedStyle(node);
-                return ["auto", "scroll", "overlay"].includes(style.overflowY)
-                    && node.scrollHeight > node.clientHeight + 2;
-            };
-            let node = list;
-            while (node && node !== document.body && !scrollable(node)) {
-                node = node.parentElement;
-            }
-            if (!node || node === document.body) node = list;
-            node.setAttribute("data-pdd-natural-chat-scroller", "true");
-            window.__pddNaturalChatScroller = node;
-            return {
-                clientHeight: node.clientHeight,
-                scrollHeight: node.scrollHeight,
-                scrollTop: node.scrollTop,
-            };
-        }
-        """,
-    )
-
-    scroll_region = page.locator('[data-pdd-natural-chat-scroller="true"]')
-    box = scroll_region.bounding_box()
-    if not box:
-        raise RuntimeError("无法获取聊天区域的屏幕位置。")
-
-    viewport = page.viewport_size or {
-        "width": int(page.evaluate("window.innerWidth")),
-        "height": int(page.evaluate("window.innerHeight")),
-    }
-    center_x = box["x"] + box["width"] / 2
-    center_y = box["y"] + box["height"] / 2
-    page.mouse.move(center_x, center_y)
-
-    # 从当前所在位置像真人一样滚回开头，不直接改 scrollTop。
-    safety = 0
-    while safety < 30:
-        top = page.evaluate("window.__pddNaturalChatScroller.scrollTop")
-        if top <= 1:
-            break
-        human_scroll(page, -min(max(int(top), 240), 720), 3, 7)
-        human_delay(120, 360)
-        safety += 1
+    _prepare_chat_capture(page, message_list, order_no, page_number)
 
     captures: list[dict] = []
-    seen_ranges: set[tuple[int, int]] = set()
+    seen_ranges: set[tuple] = set()
     screen_number = 1
     attempts = 0
     stalled = 0
@@ -1260,21 +1373,21 @@ def save_page_evidence_screenshot(
         attempts += 1
         wait_for_chat_images(page)
         human_delay(350, 1100)
+        prepare_system_mouse_page(page)
+        geometry = _chat_capture_geometry(page)
+        viewport = geometry["viewport"]
 
-        visible_info = page.locator(
-            ".new-message-list .message-item"
-        ).evaluate_all(
+        visible_info = page.locator(".new-message-list .message-item").evaluate_all(
             """
             (items) => {
-                const scroller = window.__pddNaturalChatScroller;
-                const view = scroller.getBoundingClientRect();
+                const view = window.__pddChatCapture.read().view;
                 const visibleItems = items.map((item, index) => ({
                     item,
                     index: index + 1,
                     rect: item.getBoundingClientRect(),
                 })).filter(({rect}) => (
-                    rect.bottom > view.top + 2
-                    && rect.top < view.bottom - 2
+                    rect.bottom > view.top + 2 && rect.top < view.bottom - 2
+                    && rect.right > view.left && rect.left < view.right
                 ));
 
                 // 保留发言人及时间，不能只保留有利气泡而丢失来源信息。
@@ -1288,6 +1401,7 @@ def save_page_evidence_screenshot(
                         rect.width > 0 && rect.height > 0
                         && rect.bottom > view.top
                         && rect.top < view.bottom
+                        && rect.right > view.left && rect.left < view.right
                     ));
                 });
 
@@ -1296,11 +1410,12 @@ def save_page_evidence_screenshot(
                 }
                 return {
                     indices: visibleItems.map(({index}) => index),
+                    maxMessageHeight: Math.max(...visibleItems.map(({rect}) => rect.height)),
                     fullIndices: visibleItems.filter(({rect}) => (
-                        rect.top >= Math.max(0, view.top)
-                        && rect.bottom <= Math.min(window.innerHeight, view.bottom)
-                        && rect.left >= Math.max(0, view.left)
-                        && rect.right <= Math.min(window.innerWidth, view.right)
+                        // Layout rectangles can be fractional while scrollTop
+                        // and scrollHeight round to CSS pixels at the page end.
+                        rect.top >= view.top - 1 && rect.bottom <= view.bottom + 1
+                        && rect.left >= view.left - 1 && rect.right <= view.right + 1
                     )).map(({index}) => index),
                     bounds: {
                         left: Math.max(
@@ -1329,26 +1444,38 @@ def save_page_evidence_screenshot(
             raise RuntimeError("聊天区域可见，但没有识别到当前屏幕中的消息。")
 
         message_range = (min(visible), max(visible))
-        if message_range not in seen_ranges:
-            seen_ranges.add(message_range)
+        capture_key = (
+            message_range,
+            tuple(visible_info.get("fullIndices", [])),
+            round(geometry["state"]["top"]),
+            round(geometry["pageTop"]),
+            viewport["width"],
+            viewport["height"],
+        )
+        if capture_key not in seen_ranges:
             # 按当前屏幕实际气泡的外接范围框选，而不是复用固定面板尺寸。
             # 四边余量彼此独立，让短消息、长消息、左右对话自然得到不同
             # 宽高；只增加空白，不侵入气泡，所以不会为了“不工整”截字。
             bounds = visible_info["bounds"]
-            left = max(0, bounds["left"] - random.randint(8, 30))
-            top = max(0, bounds["top"] - random.randint(4, 28))
+            left = max(geometry["view"]["left"], bounds["left"] - random.randint(8, 30))
+            top = max(geometry["view"]["top"], bounds["top"] - random.randint(4, 28))
             right = min(
-                viewport["width"],
+                geometry["view"]["right"],
                 bounds["right"] + random.randint(5, 22),
             )
             bottom = min(
-                viewport["height"],
+                geometry["view"]["bottom"],
                 bounds["bottom"] + random.randint(8, 35),
             )
             screenshot_path = screenshot_dir / (
                 f"page_{page_number:03d}_screen_{screen_number:03d}_"
                 f"msg_{message_range[0]:03d}-{message_range[1]:03d}.png"
             )
+            current = _chat_capture_geometry(page)
+            if current["viewport"] != viewport or current["view"] != geometry["view"]:
+                continue
+            if right - left < 1 or bottom - top < 1:
+                raise RuntimeError("当前聊天内容没有有效的可见截图范围，已停止截图。")
             page.screenshot(
                 path=str(screenshot_path),
                 clip={
@@ -1360,58 +1487,70 @@ def save_page_evidence_screenshot(
                 animations="disabled",
                 scale="css",
             )
-            captures.append({
-                "path": screenshot_path,
-                "start": message_range[0],
-                "end": message_range[1],
-                "full_indices": visible_info.get("fullIndices", []),
-                "includes_time": True,
-            })
+            seen_ranges.add(capture_key)
+            captures.append(
+                {
+                    "path": screenshot_path,
+                    "start": message_range[0],
+                    "end": message_range[1],
+                    "full_indices": visible_info.get("fullIndices", []),
+                    "includes_time": True,
+                }
+            )
             print(
                 f"第 {page_number} 页聊天区域截图 {screen_number}："
                 f"消息 {message_range[0]}-{message_range[1]}，{screenshot_path}"
             )
             screen_number += 1
 
-        state = page.evaluate(
-            """
-            () => {
-                const node = window.__pddNaturalChatScroller;
-                return {
-                    top: node.scrollTop,
-                    max: Math.max(0, node.scrollHeight - node.clientHeight),
-                    height: node.clientHeight,
-                };
-            }
-            """
+        scroll_geometry = _chat_capture_geometry(page)
+        state = scroll_geometry["state"]
+        if scroll_geometry["atEnd"]:
+            break
+
+        # Keep enough overlap for a short message spanning the screen boundary
+        # to appear whole on the next screen. Oversized messages remain partial.
+        overlap = min(state["height"] * 0.6, visible_info["maxMessageHeight"] + 8)
+        step = min(
+            state["height"] * random.uniform(0.65, 0.84), state["height"] - overlap
         )
-        if state["top"] >= state["max"] - 2:
-            break
-
-        distance = int(state["height"] * random.uniform(0.65, 0.84))
+        distance = max(12, min(state["max"] - state["top"], max(1, int(step))))
         previous_top = state["top"]
-        human_scroll(page, max(180, distance), 4, 9)
-        if random.random() < 0.12:
-            human_delay(100, 260)
-            human_scroll(page, -random.randint(35, 90), 2, 4)
+        reveal_end = (
+            scroll_geometry["kind"] == "element"
+            and state["top"] >= state["max"] - 1
+            and scroll_geometry["endReveal"] > 1
+        )
+        if reveal_end:
+            distance = max(12, min(320, scroll_geometry["endReveal"]))
+        _aim_chat_scroll(page, order_no, page_number, reveal=reveal_end)
+        human_scroll(page, distance, 1, 1)
         human_delay(450, 1350)
-        new_top = page.evaluate("window.__pddNaturalChatScroller.scrollTop")
-        stalled = stalled + 1 if new_top <= previous_top + 1 else 0
+        after_scroll = _chat_capture_geometry(page)
+        progressed = (
+            after_scroll["state"]["top"] > previous_top + 0.5
+            or after_scroll["pageTop"] > scroll_geometry["pageTop"] + 0.5
+        )
+        stalled = 0 if progressed else stalled + 1
         if stalled >= 3:
-            print("聊天区域连续三次没有滚动，停止当前页截图。")
-            break
+            raise RuntimeError(
+                "聊天区域连续三次没有滚动，已停止当前页截图，避免把未采全内容当作完成。"
+            )
 
+    if not _chat_capture_geometry(page)["atEnd"]:
+        raise RuntimeError(
+            "聊天截图已达到安全次数上限，但尚未采集到末尾，已停止本单分析。"
+        )
     page.evaluate(
         """
         () => {
-            window.__pddNaturalChatScroller?.removeAttribute(
-                "data-pdd-natural-chat-scroller"
-            );
             delete window.__pddNaturalChatScroller;
+            delete window.__pddChatCapture;
         }
         """
     )
     return captures
+
 
 def collect_all_chat_records(
     page: Page,
@@ -1428,15 +1567,10 @@ def collect_all_chat_records(
     """
 
     # 本次运行的唯一编号，避免多次采集时截图相互覆盖
-    run_id = datetime.now().strftime(
-        "%Y%m%d_%H%M%S"
-    )
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     if is_chat_records_empty(page):
-        print(
-            f"订单 {order_no} 查询结果为"
-            '"暂无聊天记录"，本订单没有聊天记录。'
-        )
+        print(f'订单 {order_no} 查询结果为"暂无聊天记录"，本订单没有聊天记录。')
 
         no_chat_screenshot = save_no_chat_record_screenshot(
             page=page,
@@ -1449,21 +1583,15 @@ def collect_all_chat_records(
     all_records: list[dict] = []
     visited_signatures: set[str] = set()
 
-    expected_total = get_expected_message_total(
-        page
-    )
+    expected_total = get_expected_message_total(page)
 
     if expected_total is not None:
-        print(
-            f"分页显示共有 {expected_total} 条聊天记录。"
-        )
+        print(f"分页显示共有 {expected_total} 条聊天记录。")
 
     current_page = 1
 
     while current_page <= max_pages:
-        message_list = page.locator(
-            ".new-message-list"
-        )
+        message_list = page.locator(".new-message-list")
 
         message_list.wait_for(
             state="visible",
@@ -1471,16 +1599,12 @@ def collect_all_chat_records(
         )
 
         # 确保当前页的消息已经渲染
-        page.locator(
-            ".new-message-list .message-item"
-        ).first.wait_for(
+        page.locator(".new-message-list .message-item").first.wait_for(
             state="visible",
             timeout=20_000,
         )
 
-        current_signature = (
-            get_current_page_signature(page)
-        )
+        current_signature = get_current_page_signature(page)
 
         if not current_signature:
             print(
